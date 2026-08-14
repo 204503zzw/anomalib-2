@@ -1,0 +1,89 @@
+# Copyright (C) 2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+"""使用自定义数据集训练 PatchCore 模型.
+
+数据集目录结构（二选一）：
+
+方式一：只有正常图（无监督，推荐）
+    my_dataset/
+    └── good/          # 正常图片（训练用）
+        ├── img001.png
+        ├── img002.png
+        └── ...
+
+方式二：有正常图 + 缺陷图（可选 mask）
+    my_dataset/
+    ├── good/          # 正常图片
+    │   ├── img001.png
+    │   └── ...
+    ├── defect/        # 缺陷图片（测试用）
+    │   ├── img003.png
+    │   └── ...
+    └── mask/          # 缺陷 mask（可选，与 defect 同名对应）
+        ├── img003.png
+        └── ...
+"""
+
+from anomalib.data import Folder
+from anomalib.engine import Engine
+from anomalib.models import Patchcore
+
+
+
+# ============================================================
+# 1. 配置数据集
+# ============================================================
+datamodule = Folder(
+    name="my_dataset",                # 数据集名称（用于日志）
+    root=r"/hy-tmp/unsupervised/data3/data_no",       # ← 改成你的数据集根目录
+    normal_dir="train/good",                # 正常图片所在子目录
+    abnormal_dir=r"test/ng",            # defect  缺陷图片子目录（没有就设为 None）
+    mask_dir="ground_truth/ng",                    # mask 目录（像素级标注，没有就设为 None）
+    normal_test_dir=r"test/good",             # 单独的正常测试集目录（没有就设为 None）
+    extensions=None,                  # 图片后缀过滤，如 (".png", ".jpg")，None 表示全部
+    train_batch_size=32,
+    eval_batch_size=32,
+    num_workers=0,                    # Windows 下必须设为 0，Linux 可设 8
+    test_split_mode="from_dir",       # "from_dir" 从目录划分 / "synthetic" 合成测试集
+    test_split_ratio=0,             # 没有单独测试目录时，从训练集抽取的比例
+    # val_split_mode="from_test",       # 验证集从测试集中切分
+    # val_split_ratio=1,              # 验证集占测试集的比例
+    val_split_mode="same_as_test",
+    seed=42,
+)
+
+# ============================================================
+# 2. 配置模型
+# ============================================================
+IMAGE_SIZE = (256, 320)
+model = Patchcore(
+    backbone="resnet50",       # 特征提取骨干网络
+    layers=["layer1", "layer2"],      # 使用的特征层
+    pre_trained=True,                 # 使用 ImageNet 预训练权重
+    coreset_sampling_ratio=0.1,       # coreset 采样比例（越大精度越高但越慢）
+    num_neighbors=5,                  # KNN 近邻数
+    pre_processor=Patchcore.configure_pre_processor(image_size=IMAGE_SIZE),
+)
+
+# ============================================================
+# 3. 配置引擎并训练
+# ============================================================
+engine = Engine(
+    max_epochs=1,                     # PatchCore 只需要 1 个 epoch
+    accelerator="auto",               # 自动选择 GPU/CPU
+    default_root_dir="results",       # 结果保存目录
+)
+
+# 训练
+engine.fit(model=model, datamodule=datamodule)
+
+# 测试（输出 AUROC 等指标）
+engine.test(model=model, datamodule=datamodule)
+
+# ============================================================
+# 4.（可选）导出模型
+# ============================================================
+# from anomalib.deploy import ExportType
+# engine.export(model=model, export_type=ExportType.OPENVINO)
+# engine.export(model=model, export_type=ExportType.ONNX)
