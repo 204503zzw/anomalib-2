@@ -1,0 +1,34 @@
+# ============================================================
+# PatchCore inference config
+# anomalib 2.5.x
+# ============================================================
+mode: test
+ 
+# 训练时的输入尺寸 [height, width]，必须与训练脚本一致
+image_size: [256, 320]
+ 
+model:
+  class_path: anomalib.models.Patchcore
+  init_args:
+    backbone: resnet50
+    layers:
+      - layer2
+      - layer3
+    coreset_sampling_ratio: 0.1
+    num_neighbors: 9
+ 
+data:                      # test 模式下这里是 Folder 的参数
+  name: my_dataset
+  root: /hy-tmp/unsupervised/data3/data_no
+  normal_dir: train/good
+  abnormal_dir: test/ng
+  normal_test_dir: test/good
+  mask_dir: ground_truth/ng
+  num_workers: 0
+ 
+ckpt_path: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/results/Patchcore/my_dataset/latest/weights/lightning/model.ckpt"
+ 
+output: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/output"
+ 
+show: true
+ 
