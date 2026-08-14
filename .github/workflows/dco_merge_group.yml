@@ -1,0 +1,23 @@
+# Addresses DCO merge group issue
+# https://github.com/dcoapp/app/issues/199
+# Based on code by @jcwchen
+
+name: DCO
+on:
+  merge_group:
+
+permissions: {} # No permissions by default on workflow level
+
+jobs:
+  DCO:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    if: ${{ github.actor != 'dependabot[bot]' }}
+    steps:
+      - name: Harden the runner (audit all outbound calls)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - run: echo "dummy DCO workflow (it won't run any check actually) to trigger by merge_group in order to enable merge queue"
