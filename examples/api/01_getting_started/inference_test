@@ -72,11 +72,33 @@ def save_overlay(image, anomaly_map, save_path):
     overlay = cv2.addWeighted(img, 0.7, heatmap, 0.3, 0)
     safe_imwrite(str(save_path), overlay)
  
-def build_model_from_config(model_cfg: dict, image_size=None):
+def build_post_processor(pixel_sensitivity=None, image_sensitivity=None):
+    """按需构建 OneClassPostProcessor。
+ 
+    sensitivity 作用在归一化后的 [0, 1] 尺度上，阈值 = 1 - sensitivity。
+    影响 anomalib 自己产出的 pred_mask / pred_label（即四联图里的红圈）。
+    """
+    if pixel_sensitivity is None and image_sensitivity is None:
+        return None
+    # 新版 anomalib 叫 PostProcessor，旧版叫 OneClassPostProcessor，参数相同
+    try:
+        from anomalib.post_processing import PostProcessor as _PP
+    except ImportError:
+        from anomalib.post_processing import OneClassPostProcessor as _PP
+    kwargs = {}
+    if pixel_sensitivity is not None:
+        kwargs["pixel_sensitivity"] = pixel_sensitivity
+    if image_sensitivity is not None:
+        kwargs["image_sensitivity"] = image_sensitivity
+    print(f">>> 使用 post_processor sensitivity: {kwargs}")
+    return _PP(**kwargs)
+ 
+def build_model_from_config(model_cfg: dict, image_size=None, post_processor=None):
     """根据配置构建模型。
  
     image_size: 训练时的输入尺寸 [height, width]。必须与训练脚本一致，
     否则会退回模型默认的 Resize（PatchCore 为 256x256），推理指标会变差。
+    post_processor: 可选的 OneClassPostProcessor，用于覆盖默认 0.5 阈值。
     """
     if "class_path" in model_cfg:
         import importlib
@@ -90,12 +112,16 @@ def build_model_from_config(model_cfg: dict, image_size=None):
                 image_size=tuple(image_size),
             )
             print(f">>> 使用输入尺寸 (h, w) = {tuple(image_size)}")
+        if post_processor is not None and "post_processor" not in init_args:
+            init_args["post_processor"] = post_processor
         return model_class(**init_args)
     else:
         model = get_model(model_cfg)
         if image_size is not None:
             model.pre_processor = type(model).configure_pre_processor(image_size=tuple(image_size))
             print(f">>> 使用输入尺寸 (h, w) = {tuple(image_size)}")
+        if post_processor is not None:
+            model.post_processor = post_processor
         return model
  
 def build_transform(transform_cfg: dict):
@@ -302,7 +328,11 @@ def infer(args):
  
     engine = Engine(default_root_dir=str(output_dir), devices=1)
     print(">>> 加载模型...")
-    model = build_model_from_config(args.model, args.image_size)
+    model = build_model_from_config(
+        args.model,
+        args.image_size,
+        build_post_processor(args.pixel_sensitivity, args.image_sensitivity),
+    )
  
     print(">>> 加载数据集...")
     data_cfg = dict(args.data)
@@ -412,6 +442,18 @@ def infer(args):
                     print(f"   [像素级] 漏检率={pixel_metrics['miss_rate']:.2%} 误检率={pixel_metrics['false_alarm']:.2%} F1={pixel_metrics['f1']:.4f}")
                 else:
                     print(f"   警告：{name} 无 anomaly_map，跳过像素级评估")
+            elif args.no_gt_as_normal and hasattr(pred, "anomaly_map") and pred.anomaly_map is not None:
+                # 没有 GT 文件的图当成正常图，用全零 mask 计入（贡献 TN/FP，与 anomalib 口径一致）
+                amap_np = amap.squeeze().cpu().numpy()
+                pred_mask = (amap_np > pixel_threshold).astype(np.uint8)
+                gt_mask = np.zeros_like(pred_mask)
+                img_gt_label = 0 if img_gt_label is None else img_gt_label
+                pixel_metrics = compute_pixel_metrics(pred_mask, gt_mask)
+                total_tp += pixel_metrics['tp']
+                total_fp += pixel_metrics['fp']
+                total_fn += pixel_metrics['fn']
+                total_tn += pixel_metrics['tn']
+                print(f"   [像素级无GT→视为正常] 误检率={pixel_metrics['false_alarm']:.2%}")
             else:
                 print(f"   无GT掩码，跳过像素级评估")
  
@@ -524,9 +566,16 @@ def get_parser():
     parser.add_argument("--gt_dir", type=str, default=None, help="GT掩码目录（与测试图片同名）")
     parser.add_argument("--threshold", type=float, default=0.5, help="像素级二值化阈值（默认0.5）")
     parser.add_argument("--scan_threshold", type=bool, default=False, help="是否自动扫描最佳阈值（像素级）")
+    parser.add_argument("--no_gt_as_normal", type=bool, default=False,
+                        help="gt_dir 中找不到 GT 的图视为正常图（全零 mask）并计入像素级指标")
     # 图像级评估参数
     parser.add_argument("--image_threshold", type=float, default=0.5, help="图像级异常分数阈值（默认0.5）")
     parser.add_argument("--scan_image_threshold", type=bool, default=False, help="是否自动扫描最佳阈值（图像级）")
+    # anomalib 内部后处理阈值（影响可视化四联图里的 pred_mask 红圈），阈值 = 1 - sensitivity
+    parser.add_argument("--pixel_sensitivity", type=float, default=None,
+                        help="anomalib 像素级灵敏度，阈值=1-该值，默认0.5；调大则红圈变大")
+    parser.add_argument("--image_sensitivity", type=float, default=None,
+                        help="anomalib 图像级灵敏度，阈值=1-该值，默认0.5")
     return parser
  
 if __name__ == "__main__":
