@@ -3,17 +3,30 @@
 # anomalib 2.5.x
 # ============================================================
 mode: test
+no_gt_as_normal: true
  
 # 训练时的输入尺寸 [height, width]，必须与训练脚本一致
-image_size: [256, 320]
- 
+image_size: [512, 512]
+threshold: 0.35          # 像素级，等价于 pixel_sensitivity=0.7
+image_threshold: 0.5    # 图像级，等价于 image_sensitivity=0.5
+pixel_sensitivity: 0.65
+image_sensitivity: 0.5
+
 model:
   class_path: anomalib.models.Patchcore
   init_args:
-    backbone: resnet50
+    backbone: vit_small_patch16_dinov3
     layers:
-      - layer2
-      - layer3
+      - blocks.3
+      - blocks.5
+      - blocks.8
+# model:
+#   class_path: anomalib.models.Patchcore
+#   init_args:
+#     backbone: resnet50
+#     layers:
+#       - layer1
+#       - layer2
     coreset_sampling_ratio: 0.1
     num_neighbors: 9
  
@@ -26,7 +39,7 @@ data:                      # test 模式下这里是 Folder 的参数
   mask_dir: ground_truth/ng
   num_workers: 0
  
-ckpt_path: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/results/Patchcore/my_dataset/latest/weights/lightning/model.ckpt"
+ckpt_path: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/results/Patchcore/my_dataset/latest_vit_358/weights/lightning/model.ckpt"
  
 output: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/output"
  
