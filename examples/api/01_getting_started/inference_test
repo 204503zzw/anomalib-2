@@ -536,9 +536,7 @@ def infer(args):
     # 阈值处理（像素级）
     if args.scan_threshold and (args.gt_dir or args.mode == "test"):
         print(">>> 正在扫描最佳阈值（像素级）...")
-        pixel_threshold = scan_best_threshold(
-            predictions, args.gt_dir, level='pixel', no_gt_as_normal=image_no_gt_as_normal,
-        )
+        pixel_threshold = scan_best_threshold(predictions, args.gt_dir, level='pixel')
     else:
         pixel_threshold = args.threshold
     print(f">>> 使用像素级回退阈值: {pixel_threshold:.4f}（仅在缺少 anomalib pred_mask 时，对 anomaly_map 二值化使用）")
