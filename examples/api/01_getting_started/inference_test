@@ -3,11 +3,11 @@ import os
 from pathlib import Path
 import io
 import builtins
- 
+
 # 强制标准输出/输入使用 UTF-8
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
- 
+
 # 强制 open() 默认使用 UTF-8 编码（解决 GBK 解码问题）
 original_open = builtins.open
 def utf8_open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
@@ -15,10 +15,10 @@ def utf8_open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=
         encoding = 'utf-8'
     return original_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
 builtins.open = utf8_open
- 
+
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONIOENCODING"] = "utf-8"
- 
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -28,14 +28,14 @@ from torch.utils.data import DataLoader
 from anomalib.data import Folder, PredictDataset
 from anomalib.engine import Engine
 from anomalib.models import get_model
- 
+
 # ---------- 工具函数 ----------
 def safe_imread(path: str) -> np.ndarray:
     path = str(path)
     img_array = np.fromfile(path, dtype=np.uint8)
     img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
     return img
- 
+
 def safe_imwrite(path: str, img: np.ndarray) -> bool:
     path = str(path)
     ext = Path(path).suffix
@@ -44,14 +44,14 @@ def safe_imwrite(path: str, img: np.ndarray) -> bool:
         buf.tofile(path)
         return True
     return False
- 
+
 def save_heatmap(anomaly_map, save_path):
     amap = anomaly_map.squeeze().cpu().numpy()
     amap = (amap - amap.min()) / (amap.max() - amap.min() + 1e-8)
     heatmap = (amap * 255).astype(np.uint8)
     heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
     safe_imwrite(str(save_path), heatmap)
- 
+
 def save_overlay(image, anomaly_map, save_path):
     img = image.cpu().numpy()
     if img.shape[0] == 3:
@@ -62,7 +62,7 @@ def save_overlay(image, anomaly_map, save_path):
         img = img.astype(np.uint8)
     if img.shape[2] == 3:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
- 
+
     amap = anomaly_map.squeeze().cpu().numpy()
     amap = (amap - amap.min()) / (amap.max() - amap.min() + 1e-8)
     amap = (amap * 255).astype(np.uint8)
@@ -71,10 +71,10 @@ def save_overlay(image, anomaly_map, save_path):
     heatmap = cv2.applyColorMap(amap, cv2.COLORMAP_JET)
     overlay = cv2.addWeighted(img, 0.7, heatmap, 0.3, 0)
     safe_imwrite(str(save_path), overlay)
- 
+
 def build_post_processor(pixel_sensitivity=None, image_sensitivity=None):
     """按需构建 OneClassPostProcessor。
- 
+
     sensitivity 作用在归一化后的 [0, 1] 尺度上，阈值 = 1 - sensitivity。
     影响 anomalib 自己产出的 pred_mask / pred_label（即四联图里的红圈）。
     """
@@ -92,10 +92,10 @@ def build_post_processor(pixel_sensitivity=None, image_sensitivity=None):
         kwargs["image_sensitivity"] = image_sensitivity
     print(f">>> 使用 post_processor sensitivity: {kwargs}")
     return _PP(**kwargs)
- 
+
 def build_model_from_config(model_cfg: dict, image_size=None, post_processor=None):
     """根据配置构建模型。
- 
+
     image_size: 训练时的输入尺寸 [height, width]。必须与训练脚本一致，
     否则会退回模型默认的 Resize（PatchCore 为 256x256），推理指标会变差。
     post_processor: 可选的 OneClassPostProcessor，用于覆盖默认 0.5 阈值。
@@ -123,7 +123,7 @@ def build_model_from_config(model_cfg: dict, image_size=None, post_processor=Non
         if post_processor is not None:
             model.post_processor = post_processor
         return model
- 
+
 def build_transform(transform_cfg: dict):
     import importlib
     class_path = transform_cfg["class_path"]
@@ -136,7 +136,7 @@ def build_transform(transform_cfg: dict):
     if "size" in init_args and isinstance(init_args["size"], list):
         init_args["size"] = tuple(init_args["size"])
     return cls(**init_args)
- 
+
 # ---------- 像素级评估函数 ----------
 def load_gt_mask(gt_path, target_shape=None):
     gt = safe_imread(str(gt_path))
@@ -149,7 +149,7 @@ def load_gt_mask(gt_path, target_shape=None):
     if target_shape is not None and mask.shape != target_shape:
         mask = cv2.resize(mask, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_NEAREST)
     return mask
- 
+
 def compute_pixel_metrics(pred_mask, gt_mask, eps=1e-8):
     tp = np.logical_and(pred_mask > 0, gt_mask > 0).sum()
     fp = np.logical_and(pred_mask > 0, gt_mask == 0).sum()
@@ -164,7 +164,7 @@ def compute_pixel_metrics(pred_mask, gt_mask, eps=1e-8):
     return {'tp': int(tp), 'fp': int(fp), 'fn': int(fn), 'tn': int(tn),
             'miss_rate': miss_rate, 'false_alarm': false_alarm,
             'precision': precision, 'recall': recall, 'f1': f1, 'iou': iou}
- 
+
 def get_batch_gt_label(pred, index):
     """从预测批次里取出图像级 GT 标签，没有则回退到 GT 掩膜，都没有返回 None。"""
     gt_label = getattr(pred, "gt_label", None)
@@ -173,8 +173,8 @@ def get_batch_gt_label(pred, index):
         return int(value.cpu().item())
     mask = get_batch_gt_mask(pred, index)
     return None if mask is None else int(mask.any())
- 
- 
+
+
 def get_batch_gt_mask(pred, index):
     """从预测批次里取出 GT 掩膜（测试模式下由数据集提供），没有则返回 None。"""
     gt_mask = getattr(pred, "gt_mask", None)
@@ -182,8 +182,28 @@ def get_batch_gt_mask(pred, index):
         return None
     mask = gt_mask[index] if gt_mask.dim() > 2 else gt_mask
     return mask.squeeze().cpu().numpy().astype(np.uint8)
- 
- 
+
+
+def get_batch_pred_mask(pred, index):
+    """从预测批次里取出 anomalib 生成的预测掩膜，没有则返回 None。"""
+    pred_mask = getattr(pred, "pred_mask", None)
+    if pred_mask is None:
+        return None
+    mask = pred_mask[index] if pred_mask.dim() > 2 else pred_mask
+    return mask.squeeze().cpu().numpy().astype(np.uint8)
+
+
+def get_eval_pred_mask(pred, index, anomaly_map, pixel_threshold):
+    """优先使用 anomalib 生成的预测掩膜，否则按回退阈值二值化 anomaly_map。"""
+    pred_mask = get_batch_pred_mask(pred, index)
+    if pred_mask is not None:
+        return pred_mask
+    if anomaly_map is None:
+        return None
+    amap_np = anomaly_map.squeeze().cpu().numpy()
+    return (amap_np > pixel_threshold).astype(np.uint8)
+
+
 # ---------- 区域级评估函数 ----------
 def _filter_small_regions(num_labels, labels, min_area):
     """返回面积不小于 min_area 的连通域编号列表。"""
@@ -325,31 +345,31 @@ def get_image_level_gt(gt_path):
     """判断图像级别的GT标签（有缺陷=1，无缺陷=0）"""
     gt_mask = load_gt_mask(gt_path)
     return 1 if gt_mask.sum() > 0 else 0
- 
+
 def compute_image_metrics(predictions, gt_files, score_threshold=0.5):
     """
     计算图像级别的混淆矩阵和评估指标
-    
+
     Args:
         predictions: 模型预测结果列表
         gt_files: GT文件字典 {stem: path}
         score_threshold: 异常分数阈值
-    
+
     Returns:
         dict: 包含TP, FP, TN, FN及各项指标
     """
     img_tp = img_fp = img_tn = img_fn = 0
-    
+
     for idx, pred in enumerate(predictions):
         image_paths = pred.image_path if isinstance(pred.image_path, list) else [pred.image_path]
-        
+
         for i, img_path in enumerate(image_paths):
             name = Path(img_path).stem
-            
+
             # 获取预测分数和标签
             score = pred.pred_score[i].cpu().item() if pred.pred_score.dim() > 0 else pred.pred_score.cpu().item()
             pred_label = 1 if score >= score_threshold else 0
-            
+
             # 获取GT标签：优先用数据集自带的（测试模式），否则按文件名查 gt_dir
             gt_label = get_batch_gt_label(pred, i)
             if gt_label is None and name in gt_files:
@@ -364,19 +384,19 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5):
                     img_tn += 1
                 elif pred_label == 0 and gt_label == 1:
                     img_fn += 1
-    
+
     # 计算指标
     eps = 1e-8
     total_positive = img_tp + img_fn
     total_negative = img_fp + img_tn
-    
+
     miss_rate = img_fn / (total_positive + eps)  # 漏检率 = FN / (TP + FN)
     false_alarm = img_fp / (total_negative + eps)  # 误检率 = FP / (FP + TN)
     precision = img_tp / (img_tp + img_fp + eps)
     recall = img_tp / (img_tp + img_fn + eps)
     f1 = 2 * precision * recall / (precision + recall + eps)
     accuracy = (img_tp + img_tn) / (img_tp + img_fp + img_tn + img_fn + eps)
-    
+
     return {
         'tp': img_tp, 'fp': img_fp, 'tn': img_tn, 'fn': img_fn,
         'miss_rate': miss_rate,
@@ -386,13 +406,13 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5):
         'f1': f1,
         'accuracy': accuracy
     }
- 
+
 def collect_eval_pairs(predictions, gt_dir=None):
-    """逐张收集 (anomaly_map, gt_mask) 对，GT 优先取数据集自带的，否则按文件名查 gt_dir。"""
+    """逐张收集回退阈值扫描所需的 (anomaly_map, gt_mask) 对。"""
     gt_files = {}
     if gt_dir:
         gt_files = {f.stem: f for f in Path(gt_dir).iterdir() if f.is_file()}
- 
+
     pairs = []
     for pred in predictions:
         if getattr(pred, "anomaly_map", None) is None:
@@ -412,11 +432,11 @@ def collect_eval_pairs(predictions, gt_dir=None):
                                      interpolation=cv2.INTER_NEAREST)
             pairs.append((amap, gt_mask))
     return pairs
- 
- 
+
+
 def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel'):
-    """扫描最佳阈值
- 
+    """扫描 anomaly_map 二值化回退路径的最佳阈值。
+
     Args:
         predictions: 预测结果
         gt_dir: GT目录（测试模式下可为 None，GT 从数据集取）
@@ -425,7 +445,7 @@ def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel'):
     """
     thresholds = np.linspace(0.0, 1.0, num_steps)
     best_f1, best_th = 0.0, 0.5
- 
+
     if level == 'image':
         gt_files = {f.stem: f for f in Path(gt_dir).iterdir() if f.is_file()} if gt_dir else {}
         for th in thresholds:
@@ -450,10 +470,10 @@ def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel'):
             f1 = 2 * precision * recall / (precision + recall + 1e-8)
             if f1 > best_f1:
                 best_f1, best_th = f1, th
- 
+
     print(f"扫描完成（{level}级）：最佳阈值 = {best_th:.4f}，对应 F1 = {best_f1:.4f}")
     return best_th
- 
+
 # ---------- 主推理函数 ----------
 def infer(args):
     output_dir = Path(args.output)
@@ -461,7 +481,7 @@ def infer(args):
     overlay_dir = output_dir / "overlay"
     heatmap_dir.mkdir(parents=True, exist_ok=True)
     overlay_dir.mkdir(parents=True, exist_ok=True)
- 
+
     engine = Engine(default_root_dir=str(output_dir), devices=1)
     print(">>> 加载模型...")
     model = build_model_from_config(
@@ -469,14 +489,14 @@ def infer(args):
         args.image_size,
         build_post_processor(args.pixel_sensitivity, args.image_sensitivity),
     )
- 
+
     print(">>> 加载数据集...")
     data_cfg = dict(args.data)
     if "image_size" in data_cfg and isinstance(data_cfg["image_size"], list):
         data_cfg["image_size"] = tuple(data_cfg["image_size"])
     if "transform" in data_cfg and isinstance(data_cfg["transform"], dict):
         data_cfg["transform"] = build_transform(data_cfg["transform"])
- 
+
     if args.mode == "test":
         # 测试模式：Folder 数据集自带 gt_label / gt_mask，先跑 anomalib 官方指标表
         # 默认 val_split_mode=from_test 会抽走一半测试图，评估时改成 same_as_test 保证测试集完整
@@ -492,12 +512,12 @@ def infer(args):
         dataloader = DataLoader(dataset, batch_size=1, collate_fn=dataset.collate_fn)
         print(f">>> 开始推理，共 {len(dataset)} 张图片")
         print(f">>> 使用权重: {args.ckpt_path}")
- 
+
     predictions = engine.predict(model=model, dataloaders=[dataloader], ckpt_path=args.ckpt_path)
     if predictions is None or len(predictions) == 0:
         print("!!! 未获得任何预测结果")
         return
- 
+
     # 准备GT文件索引
     gt_files = {}
     if args.gt_dir:
@@ -505,15 +525,28 @@ def infer(args):
         for f in gt_dir_path.iterdir():
             if f.is_file() and f.suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
                 gt_files[f.stem] = f
- 
+
     # 阈值处理（像素级）
     if args.scan_threshold and (args.gt_dir or args.mode == "test"):
         print(">>> 正在扫描最佳阈值（像素级）...")
         pixel_threshold = scan_best_threshold(predictions, args.gt_dir, level='pixel')
     else:
         pixel_threshold = args.threshold
-    print(f">>> 使用像素级阈值: {pixel_threshold:.4f}")
- 
+    print(f">>> 使用像素级回退阈值: {pixel_threshold:.4f}（仅在缺少 anomalib pred_mask 时，对 anomaly_map 二值化使用）")
+
+    pred_mask_available = any(getattr(pred, "pred_mask", None) is not None for pred in predictions)
+    fallback_available = any(
+        getattr(pred, "pred_mask", None) is None and getattr(pred, "anomaly_map", None) is not None
+        for pred in predictions
+    )
+    if pred_mask_available and fallback_available:
+        pixel_mask_source = "优先使用 anomalib pred_mask；缺失时回退到 anomaly_map > 回退阈值"
+    elif pred_mask_available:
+        pixel_mask_source = "anomalib pred_mask"
+    else:
+        pixel_mask_source = "anomaly_map > 回退阈值"
+    print(f">>> 像素级/区域级评估掩膜来源: {pixel_mask_source}")
+
     # 图像级阈值
     if args.scan_image_threshold and (args.gt_dir or args.mode == "test"):
         print(">>> 正在扫描最佳阈值（图像级）...")
@@ -521,13 +554,13 @@ def infer(args):
     else:
         image_threshold = args.image_threshold
     print(f">>> 使用图像级阈值: {image_threshold:.4f}")
- 
+
     results = []
     region_rows = []
     region_detail_blocks = []
     total_tp = total_fp = total_fn = total_tn = 0
     total_gt_regions = total_detected = total_missed = total_region_fp = 0
- 
+
     for idx, pred in enumerate(predictions):
         image_paths = pred.image_path if isinstance(pred.image_path, list) else [pred.image_path]
         for i, img_path in enumerate(image_paths):
@@ -537,25 +570,27 @@ def infer(args):
                 print(f"[{idx+1}] {img_path} | score={score:.4f} | label={label}")
             except UnicodeEncodeError:
                 print(f"[{idx+1}] <路径含特殊字符> | score={score:.4f} | label={label}")
- 
+
             name = Path(img_path).stem
- 
+
             # 保存热力图和叠加图
-            if hasattr(pred, "anomaly_map") and pred.anomaly_map is not None:
-                amap = pred.anomaly_map[i] if pred.anomaly_map.dim() >= 3 else pred.anomaly_map
+            anomaly_map = getattr(pred, "anomaly_map", None)
+            amap = None
+            if anomaly_map is not None:
+                amap = anomaly_map[i] if anomaly_map.dim() >= 3 else anomaly_map
                 img = pred.image[i] if pred.image.dim() == 4 else pred.image
                 save_heatmap(amap, heatmap_dir / f"{name}_heatmap.jpg")
                 save_overlay(img, amap, overlay_dir / f"{name}_overlay.jpg")
- 
-            # 像素级评估：测试模式直接用数据集自带的 GT，否则按文件名去 gt_dir 找
+
+            # 像素级评估：优先使用 anomalib 的 pred_mask，否则按回退阈值二值化 anomaly_map
             pixel_metrics = None
             pred_mask = gt_mask = None
             img_gt_label = get_batch_gt_label(pred, i)
             batch_gt_mask = get_batch_gt_mask(pred, i)
+            eval_pred_mask = get_eval_pred_mask(pred, i, amap, pixel_threshold)
             if batch_gt_mask is not None:
-                if hasattr(pred, "anomaly_map") and pred.anomaly_map is not None:
-                    amap_np = amap.squeeze().cpu().numpy()
-                    pred_mask = (amap_np > pixel_threshold).astype(np.uint8)
+                if eval_pred_mask is not None:
+                    pred_mask = eval_pred_mask
                     gt_mask = batch_gt_mask
                     if gt_mask.shape != pred_mask.shape:
                         gt_mask = cv2.resize(gt_mask, (pred_mask.shape[1], pred_mask.shape[0]),
@@ -569,10 +604,9 @@ def infer(args):
             elif args.gt_dir and name in gt_files:
                 gt_path = gt_files[name]
                 img_gt_label = get_image_level_gt(gt_path)
- 
-                if hasattr(pred, "anomaly_map") and pred.anomaly_map is not None:
-                    amap_np = amap.squeeze().cpu().numpy()
-                    pred_mask = (amap_np > pixel_threshold).astype(np.uint8)
+
+                if eval_pred_mask is not None:
+                    pred_mask = eval_pred_mask
                     gt_mask = load_gt_mask(gt_path, target_shape=pred_mask.shape)
                     pixel_metrics = compute_pixel_metrics(pred_mask, gt_mask)
                     total_tp += pixel_metrics['tp']
@@ -582,10 +616,9 @@ def infer(args):
                     print(f"   [像素级] 漏检率={pixel_metrics['miss_rate']:.2%} 误检率={pixel_metrics['false_alarm']:.2%} F1={pixel_metrics['f1']:.4f}")
                 else:
                     print(f"   警告：{name} 无 anomaly_map，跳过像素级评估")
-            elif args.no_gt_as_normal and hasattr(pred, "anomaly_map") and pred.anomaly_map is not None:
+            elif args.no_gt_as_normal and eval_pred_mask is not None:
                 # 没有 GT 文件的图当成正常图，用全零 mask 计入（贡献 TN/FP，与 anomalib 口径一致）
-                amap_np = amap.squeeze().cpu().numpy()
-                pred_mask = (amap_np > pixel_threshold).astype(np.uint8)
+                pred_mask = eval_pred_mask
                 gt_mask = np.zeros_like(pred_mask)
                 img_gt_label = 0 if img_gt_label is None else img_gt_label
                 pixel_metrics = compute_pixel_metrics(pred_mask, gt_mask)
@@ -618,23 +651,23 @@ def infer(args):
                                 f"漏检={region_metrics['region_missed']} 误报={region_metrics['region_fp']}"),
                     'lines': format_region_details(region_metrics),
                 })
- 
+
             # 构建结果行
             row = {
-                "image": str(img_path), 
-                "score": score, 
+                "image": str(img_path),
+                "score": score,
                 "pred_label": 1 if score >= image_threshold else 0,
                 "gt_label": img_gt_label if img_gt_label is not None else "N/A"
             }
             if pixel_metrics:
                 row.update({
-                    "pixel_miss_rate": pixel_metrics['miss_rate'], 
+                    "pixel_miss_rate": pixel_metrics['miss_rate'],
                     "pixel_false_alarm": pixel_metrics['false_alarm'],
-                    "pixel_f1": pixel_metrics['f1'], 
+                    "pixel_f1": pixel_metrics['f1'],
                     "pixel_iou": pixel_metrics['iou'],
-                    "pixel_tp": pixel_metrics['tp'], 
+                    "pixel_tp": pixel_metrics['tp'],
                     "pixel_fp": pixel_metrics['fp'],
-                    "pixel_fn": pixel_metrics['fn'], 
+                    "pixel_fn": pixel_metrics['fn'],
                     "pixel_tn": pixel_metrics['tn'],
                     "region_gt": pixel_metrics.get('region_gt', ''),
                     "region_detected": pixel_metrics.get('region_detected', ''),
@@ -643,7 +676,7 @@ def infer(args):
                     "region_best_iou": round(pixel_metrics.get('region_best_iou', 0.0), 4)
                 })
             results.append(row)
- 
+
     # ========== 像素级全局汇总 ==========
     if total_tp + total_fn + total_fp > 0:
         global_miss = total_fn / (total_fn + total_tp + 1e-8)
@@ -652,14 +685,15 @@ def infer(args):
         global_recall = total_tp / (total_tp + total_fn + 1e-8)
         global_f1 = 2 * global_precision * global_recall / (global_precision + global_recall + 1e-8)
         global_iou = total_tp / (total_tp + total_fp + total_fn + 1e-8)
-        
+
         print("\n" + "="*60)
         print("【像素级全局评估结果】")
         print(f"漏检率 (Miss Rate):   {global_miss:.2%}")
         print(f"误检率 (False Alarm): {global_fa:.2%}")
         print(f"F1-Score:             {global_f1:.4f}")
         print(f"IoU:                  {global_iou:.4f}")
-        print(f"使用阈值:             {pixel_threshold:.4f}")
+        print(f"掩膜来源:             {pixel_mask_source}")
+        print(f"回退阈值:             {pixel_threshold:.4f}")
         print(f"TP={total_tp} FP={total_fp} FN={total_fn} TN={total_tn}")
         print("-"*60)
         region_miss = total_missed / (total_gt_regions + 1e-8)
@@ -669,11 +703,11 @@ def infer(args):
         print(f"漏检:                 {total_missed}  (漏检率 {region_miss:.2%})")
         print(f"误报区域:             {total_region_fp}")
         print("="*60)
- 
+
     # ========== 图像级全局汇总 ==========
     if args.mode == "test" or (args.gt_dir and len(gt_files) > 0):
         img_metrics = compute_image_metrics(predictions, gt_files, score_threshold=image_threshold)
-        
+
         print("\n" + "="*60)
         print("【图像级全局评估结果】")
         print(f"漏检率 (Miss Rate):   {img_metrics['miss_rate']:.2%}")
@@ -685,7 +719,7 @@ def infer(args):
         print(f"使用阈值:             {image_threshold:.4f}")
         print(f"TP={img_metrics['tp']} FP={img_metrics['fp']} TN={img_metrics['tn']} FN={img_metrics['fn']}")
         print("="*60)
- 
+
         # 保存汇总报告
         summary_path = output_dir / "evaluation_summary.txt"
         with open(summary_path, 'w', encoding='utf-8') as f:
@@ -696,13 +730,14 @@ def infer(args):
                 f.write(f"误检率: {global_fa:.4f}\n")
                 f.write(f"F1-Score: {global_f1:.4f}\n")
                 f.write(f"IoU: {global_iou:.4f}\n")
-                f.write(f"阈值: {pixel_threshold:.4f}\n")
+                f.write(f"掩膜来源: {pixel_mask_source}\n")
+                f.write(f"回退阈值: {pixel_threshold:.4f}\n")
                 f.write(f"TP={total_tp} FP={total_fp} FN={total_fn} TN={total_tn}\n")
                 f.write(f"区域级覆盖率阈值: {args.coverage_threshold:.2f}\n")
                 f.write(f"区域级 缺陷总数={total_gt_regions} 检出={total_detected} "
                         f"漏检={total_missed} 误报={total_region_fp}\n")
                 f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
-            
+
             f.write("\n" + "=" * 60 + "\n")
             f.write("【图像级评估】\n")
             f.write(f"漏检率: {img_metrics['miss_rate']:.4f}\n")
@@ -723,9 +758,9 @@ def infer(args):
                     for line in block['lines']:
                         f.write(f"  {line}\n")
                 f.write("=" * 60 + "\n")
-        
+
         print(f"\n汇总报告已保存: {summary_path}")
- 
+
     # 保存区域级明细CSV
     if region_rows:
         region_csv_path = output_dir / "region_detail.csv"
@@ -740,7 +775,7 @@ def infer(args):
         df['pixel_false_alarm'] = df['pixel_false_alarm'].apply(lambda x: f"{x:.2%}" if isinstance(x, float) else x)
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     print(f"\n推理完成，结果保存到: {output_dir}")
- 
+
 # ---------- 命令行解析 ----------
 def get_parser():
     parser = ArgumentParser()
@@ -757,8 +792,10 @@ def get_parser():
                         help="训练时的输入尺寸 [height, width]，必须与训练脚本一致")
     # 像素级评估参数
     parser.add_argument("--gt_dir", type=str, default=None, help="GT掩码目录（与测试图片同名）")
-    parser.add_argument("--threshold", type=float, default=0.5, help="像素级二值化阈值（默认0.5）")
-    parser.add_argument("--scan_threshold", type=bool, default=False, help="是否自动扫描最佳阈值（像素级）")
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="像素级回退二值化阈值：仅在 pred_mask 不可用时用于 anomaly_map（默认0.5）")
+    parser.add_argument("--scan_threshold", type=bool, default=False,
+                        help="是否自动扫描 anomaly_map 回退路径的最佳阈值（像素级）")
     parser.add_argument("--no_gt_as_normal", type=bool, default=False,
                         help="gt_dir 中找不到 GT 的图视为正常图（全零 mask）并计入像素级指标")
     # 图像级评估参数
@@ -775,7 +812,7 @@ def get_parser():
     parser.add_argument("--min_region_area", type=int, default=0,
                         help="忽略面积小于该值的连通域（像素数），用于过滤噪点")
     return parser
- 
+
 if __name__ == "__main__":
     parser = get_parser()
     args = parser.parse_args()
