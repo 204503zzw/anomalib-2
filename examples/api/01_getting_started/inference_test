@@ -184,6 +184,134 @@ def get_batch_gt_mask(pred, index):
     return mask.squeeze().cpu().numpy().astype(np.uint8)
  
  
+# ---------- 区域级评估函数 ----------
+def _filter_small_regions(num_labels, labels, min_area):
+    """返回面积不小于 min_area 的连通域编号列表。"""
+    return [i for i in range(1, num_labels) if (labels == i).sum() >= min_area]
+
+
+def _region_bbox(region):
+    """返回连通域的外接框 (x, y, w, h)。"""
+    ys, xs = np.nonzero(region)
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    return x0, y0, x1 - x0 + 1, y1 - y0 + 1
+
+
+def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=0):
+    """区域级（每个缺陷）评估：按 GT 缺陷被预测覆盖的像素比例判定。
+
+    覆盖率 = 该 GT 区域与所有预测区域的交集像素数 / GT 区域面积，
+    >= coverage_threshold 记为检出，否则记为漏检；贡献了该覆盖的预测区域全部算命中，
+      没命中任何已检出 GT 的预测区域记为误报。IoU 仅作为明细里的参考值。
+
+    除汇总计数外，还逐个区域给出明细：
+    - ``gt_regions``: 每个 GT 缺陷的面积、外接框、覆盖率、最佳 IoU、匹配到的预测区域、
+      检出/漏检状态；
+    - ``pred_regions``: 每个预测区域的面积、外接框、与 GT 的最佳 IoU、命中/误报状态，
+      以及该预测区域落在 GT 内的像素比例。
+    """
+    n_gt, gt_labels = cv2.connectedComponents(gt_mask.astype(np.uint8))
+    n_pred, pred_labels = cv2.connectedComponents(pred_mask.astype(np.uint8))
+    gt_ids = _filter_small_regions(n_gt, gt_labels, min_area)
+    pred_ids = _filter_small_regions(n_pred, pred_labels, min_area)
+    pred_masks = {p: pred_labels == p for p in pred_ids}
+
+    detected, missed, matched_pred, ious = 0, 0, set(), []
+    gt_details = []
+    pred_best_iou = {p: 0.0 for p in pred_ids}
+    pred_inter = {p: 0 for p in pred_ids}
+    for g in gt_ids:
+        gt_region = gt_labels == g
+        gt_area = int(gt_region.sum())
+        best_iou, best_pred, best_inter, covered = 0.0, None, 0, 0
+        overlapping = []
+        for p in pred_ids:
+            intersection = int(np.logical_and(gt_region, pred_masks[p]).sum())
+            if intersection == 0:
+                continue
+            covered += intersection
+            pred_inter[p] += intersection
+            overlapping.append(p)
+            iou = intersection / np.logical_or(gt_region, pred_masks[p]).sum()
+            pred_best_iou[p] = max(pred_best_iou[p], iou)
+            if intersection > best_inter:
+                best_pred, best_inter = p, intersection
+            best_iou = max(best_iou, iou)
+        ious.append(best_iou)
+        covered_ratio = covered / (gt_area + 1e-8)
+        hit = covered_ratio >= coverage_threshold
+        if hit:
+            detected += 1
+            # 覆盖可能由多个预测区域共同贡献，它们都算命中
+            matched_pred.update(overlapping)
+        else:
+            missed += 1
+        x, y, w, h = _region_bbox(gt_region)
+        gt_details.append({
+            'gt_id': g, 'area': gt_area, 'bbox': (x, y, w, h),
+            'best_iou': best_iou,
+            'matched_pred_id': best_pred if hit else None,
+            'matched_inter': best_inter if hit else 0,
+            'covered_ratio': covered_ratio,
+            'status': 'detected' if hit else 'missed',
+        })
+
+    pred_details = []
+    for p in pred_ids:
+        pred_area = int(pred_masks[p].sum())
+        x, y, w, h = _region_bbox(pred_masks[p])
+        pred_details.append({
+            'pred_id': p, 'area': pred_area, 'bbox': (x, y, w, h),
+            'best_iou': pred_best_iou[p],
+            'gt_overlap_ratio': pred_inter[p] / (pred_area + 1e-8),
+            'status': 'matched' if p in matched_pred else 'false_alarm',
+        })
+
+    false_alarm_regions = len(pred_ids) - len(matched_pred)
+    return {'region_gt': len(gt_ids), 'region_detected': detected, 'region_missed': missed,
+            'region_fp': false_alarm_regions, 'region_best_iou': max(ious) if ious else 0.0,
+            'gt_regions': gt_details, 'pred_regions': pred_details}
+
+
+def collect_region_rows(image_path, region_metrics):
+    """把单张图的区域级明细展开成每个区域一行，供 CSV 输出。"""
+    image_name = Path(image_path).name
+    rows = []
+    for r in region_metrics['gt_regions']:
+        x, y, w, h = r['bbox']
+        rows.append({'image': image_name, 'region_type': 'gt', 'region_id': r['gt_id'],
+                     'status': r['status'], 'area': r['area'],
+                     'bbox_x': x, 'bbox_y': y, 'bbox_w': w, 'bbox_h': h,
+                     'best_iou': round(r['best_iou'], 4),
+                     'matched_id': '' if r['matched_pred_id'] is None else r['matched_pred_id'],
+                     'overlap_ratio': round(r['covered_ratio'], 4)})
+    for r in region_metrics['pred_regions']:
+        x, y, w, h = r['bbox']
+        rows.append({'image': image_name, 'region_type': 'pred', 'region_id': r['pred_id'],
+                     'status': r['status'], 'area': r['area'],
+                     'bbox_x': x, 'bbox_y': y, 'bbox_w': w, 'bbox_h': h,
+                     'best_iou': round(r['best_iou'], 4), 'matched_id': '',
+                     'overlap_ratio': round(r['gt_overlap_ratio'], 4)})
+    return rows
+
+
+def print_region_details(region_metrics):
+    """打印每个 GT 缺陷的检出/漏检情况，以及误报的预测区域。"""
+    for r in region_metrics['gt_regions']:
+        x, y, w, h = r['bbox']
+        state = "检出" if r['status'] == 'detected' else "漏检"
+        matched = f" 主匹配预测#{r['matched_pred_id']}" if r['matched_pred_id'] is not None else ""
+        print(f"     GT#{r['gt_id']} {state} 面积={r['area']} 框=({x},{y},{w},{h}) "
+              f"覆盖率={r['covered_ratio']:.2%} IoU={r['best_iou']:.4f}{matched}")
+    for r in region_metrics['pred_regions']:
+        if r['status'] != 'false_alarm':
+            continue
+        x, y, w, h = r['bbox']
+        print(f"     预测#{r['pred_id']} 误报 面积={r['area']} 框=({x},{y},{w},{h}) "
+              f"IoU={r['best_iou']:.4f} 落入GT比例={r['gt_overlap_ratio']:.2%}")
+
+
 # ---------- 图像级评估函数 ----------
 def get_image_level_gt(gt_path):
     """判断图像级别的GT标签（有缺陷=1，无缺陷=0）"""
@@ -387,7 +515,9 @@ def infer(args):
     print(f">>> 使用图像级阈值: {image_threshold:.4f}")
  
     results = []
+    region_rows = []
     total_tp = total_fp = total_fn = total_tn = 0
+    total_gt_regions = total_detected = total_missed = total_region_fp = 0
  
     for idx, pred in enumerate(predictions):
         image_paths = pred.image_path if isinstance(pred.image_path, list) else [pred.image_path]
@@ -410,6 +540,7 @@ def infer(args):
  
             # 像素级评估：测试模式直接用数据集自带的 GT，否则按文件名去 gt_dir 找
             pixel_metrics = None
+            pred_mask = gt_mask = None
             img_gt_label = get_batch_gt_label(pred, i)
             batch_gt_mask = get_batch_gt_mask(pred, i)
             if batch_gt_mask is not None:
@@ -456,6 +587,22 @@ def infer(args):
                 print(f"   [像素级无GT→视为正常] 误检率={pixel_metrics['false_alarm']:.2%}")
             else:
                 print(f"   无GT掩码，跳过像素级评估")
+
+            # 区域级评估：按 GT 缺陷被预测覆盖的比例判定检出/漏检
+            if pixel_metrics is not None and pred_mask is not None and gt_mask is not None:
+                region_metrics = compute_region_metrics(
+                    pred_mask, gt_mask, args.coverage_threshold, args.min_region_area,
+                )
+                pixel_metrics.update(region_metrics)
+                total_gt_regions += region_metrics['region_gt']
+                total_detected += region_metrics['region_detected']
+                total_missed += region_metrics['region_missed']
+                total_region_fp += region_metrics['region_fp']
+                print(f"   [区域级] 缺陷{region_metrics['region_gt']}个 检出{region_metrics['region_detected']}个 "
+                      f"漏检{region_metrics['region_missed']}个 误报{region_metrics['region_fp']}个 "
+                      f"最大IoU={region_metrics['region_best_iou']:.4f}")
+                region_rows += collect_region_rows(img_path, region_metrics)
+                print_region_details(region_metrics)
  
             # 构建结果行
             row = {
@@ -473,7 +620,12 @@ def infer(args):
                     "pixel_tp": pixel_metrics['tp'], 
                     "pixel_fp": pixel_metrics['fp'],
                     "pixel_fn": pixel_metrics['fn'], 
-                    "pixel_tn": pixel_metrics['tn']
+                    "pixel_tn": pixel_metrics['tn'],
+                    "region_gt": pixel_metrics.get('region_gt', ''),
+                    "region_detected": pixel_metrics.get('region_detected', ''),
+                    "region_missed": pixel_metrics.get('region_missed', ''),
+                    "region_fp": pixel_metrics.get('region_fp', ''),
+                    "region_best_iou": round(pixel_metrics.get('region_best_iou', 0.0), 4)
                 })
             results.append(row)
  
@@ -494,6 +646,13 @@ def infer(args):
         print(f"IoU:                  {global_iou:.4f}")
         print(f"使用阈值:             {pixel_threshold:.4f}")
         print(f"TP={total_tp} FP={total_fp} FN={total_fn} TN={total_tn}")
+        print("-"*60)
+        region_miss = total_missed / (total_gt_regions + 1e-8)
+        print(f"【区域级】覆盖率阈值 {args.coverage_threshold:.2f}")
+        print(f"缺陷总数:             {total_gt_regions}")
+        print(f"检出:                 {total_detected}")
+        print(f"漏检:                 {total_missed}  (漏检率 {region_miss:.2%})")
+        print(f"误报区域:             {total_region_fp}")
         print("="*60)
  
     # ========== 图像级全局汇总 ==========
@@ -524,6 +683,10 @@ def infer(args):
                 f.write(f"IoU: {global_iou:.4f}\n")
                 f.write(f"阈值: {pixel_threshold:.4f}\n")
                 f.write(f"TP={total_tp} FP={total_fp} FN={total_fn} TN={total_tn}\n")
+                f.write(f"区域级覆盖率阈值: {args.coverage_threshold:.2f}\n")
+                f.write(f"区域级 缺陷总数={total_gt_regions} 检出={total_detected} "
+                        f"漏检={total_missed} 误报={total_region_fp}\n")
+                f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
             
             f.write("\n" + "=" * 60 + "\n")
             f.write("【图像级评估】\n")
@@ -539,6 +702,12 @@ def infer(args):
         
         print(f"\n汇总报告已保存: {summary_path}")
  
+    # 保存区域级明细CSV
+    if region_rows:
+        region_csv_path = output_dir / "region_detail.csv"
+        pd.DataFrame(region_rows).to_csv(region_csv_path, index=False, encoding="utf-8-sig")
+        print(f"区域级明细已保存: {region_csv_path}")
+
     # 保存CSV
     csv_path = output_dir / "result.csv"
     df = pd.DataFrame(results)
@@ -576,6 +745,11 @@ def get_parser():
                         help="anomalib 像素级灵敏度，阈值=1-该值，默认0.5；调大则红圈变大")
     parser.add_argument("--image_sensitivity", type=float, default=None,
                         help="anomalib 图像级灵敏度，阈值=1-该值，默认0.5")
+    # 区域级评估参数
+    parser.add_argument("--coverage_threshold", type=float, default=0.3,
+                        help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检")
+    parser.add_argument("--min_region_area", type=int, default=0,
+                        help="忽略面积小于该值的连通域（像素数），用于过滤噪点")
     return parser
  
 if __name__ == "__main__":
