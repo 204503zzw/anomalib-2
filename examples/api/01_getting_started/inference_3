@@ -216,15 +216,16 @@ def _region_bbox(region):
     return x0, y0, x1 - x0 + 1, y1 - y0 + 1
 
 
-def compute_region_metrics(pred_mask, gt_mask, iou_threshold=0.3, min_area=0):
-    """区域级（每个缺陷）评估：GT 连通域与预测连通域按 IoU 匹配。
+def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=0):
+    """区域级（每个缺陷）评估：按 GT 缺陷被预测覆盖的像素比例判定。
 
-    每个 GT 缺陷取与它 IoU 最大的预测区域，IoU >= iou_threshold 记为检出，
-    否则记为漏检；没有匹配上任何 GT 的预测区域记为误报。
+    覆盖率 = 该 GT 区域与所有预测区域的交集像素数 / GT 区域面积，
+    >= coverage_threshold 记为检出，否则记为漏检；贡献了该覆盖的预测区域全部算命中，
+      没命中任何已检出 GT 的预测区域记为误报。IoU 仅作为明细里的参考值。
 
     除汇总计数外，还逐个区域给出明细：
-    - ``gt_regions``: 每个 GT 缺陷的面积、外接框、最佳 IoU、匹配到的预测区域、检出/漏检状态，
-      以及该 GT 被预测覆盖的像素比例；
+    - ``gt_regions``: 每个 GT 缺陷的面积、外接框、覆盖率、最佳 IoU、匹配到的预测区域、
+      检出/漏检状态；
     - ``pred_regions``: 每个预测区域的面积、外接框、与 GT 的最佳 IoU、命中/误报状态，
       以及该预测区域落在 GT 内的像素比例。
     """
@@ -242,21 +243,26 @@ def compute_region_metrics(pred_mask, gt_mask, iou_threshold=0.3, min_area=0):
         gt_region = gt_labels == g
         gt_area = int(gt_region.sum())
         best_iou, best_pred, best_inter, covered = 0.0, None, 0, 0
+        overlapping = []
         for p in pred_ids:
             intersection = int(np.logical_and(gt_region, pred_masks[p]).sum())
             if intersection == 0:
                 continue
             covered += intersection
             pred_inter[p] += intersection
+            overlapping.append(p)
             iou = intersection / np.logical_or(gt_region, pred_masks[p]).sum()
             pred_best_iou[p] = max(pred_best_iou[p], iou)
-            if iou > best_iou:
-                best_iou, best_pred, best_inter = iou, p, intersection
+            if intersection > best_inter:
+                best_pred, best_inter = p, intersection
+            best_iou = max(best_iou, iou)
         ious.append(best_iou)
-        hit = best_iou >= iou_threshold
+        covered_ratio = covered / (gt_area + 1e-8)
+        hit = covered_ratio >= coverage_threshold
         if hit:
             detected += 1
-            matched_pred.add(best_pred)
+            # 覆盖可能由多个预测区域共同贡献，它们都算命中
+            matched_pred.update(overlapping)
         else:
             missed += 1
         x, y, w, h = _region_bbox(gt_region)
@@ -265,7 +271,7 @@ def compute_region_metrics(pred_mask, gt_mask, iou_threshold=0.3, min_area=0):
             'best_iou': best_iou,
             'matched_pred_id': best_pred if hit else None,
             'matched_inter': best_inter if hit else 0,
-            'covered_ratio': covered / (gt_area + 1e-8),
+            'covered_ratio': covered_ratio,
             'status': 'detected' if hit else 'missed',
         })
 
@@ -313,9 +319,9 @@ def print_region_details(region_metrics):
     for r in region_metrics['gt_regions']:
         x, y, w, h = r['bbox']
         state = "检出" if r['status'] == 'detected' else "漏检"
-        matched = f" 匹配预测#{r['matched_pred_id']}" if r['matched_pred_id'] is not None else ""
+        matched = f" 主匹配预测#{r['matched_pred_id']}" if r['matched_pred_id'] is not None else ""
         print(f"     GT#{r['gt_id']} {state} 面积={r['area']} 框=({x},{y},{w},{h}) "
-              f"IoU={r['best_iou']:.4f} 覆盖率={r['covered_ratio']:.2%}{matched}")
+              f"覆盖率={r['covered_ratio']:.2%} IoU={r['best_iou']:.4f}{matched}")
     for r in region_metrics['pred_regions']:
         if r['status'] != 'false_alarm':
             continue
@@ -495,7 +501,7 @@ def infer(args):
                     gt_label = int(gt_mask.any())
                 pixel_metrics = compute_pixel_metrics(pred_mask, gt_mask)
                 region_metrics = compute_region_metrics(
-                    pred_mask, gt_mask, args.iou_threshold, args.min_region_area,
+                    pred_mask, gt_mask, args.coverage_threshold, args.min_region_area,
                 )
                 pixel_metrics.update(region_metrics)
                 total_gt_regions += region_metrics['region_gt']
@@ -588,7 +594,7 @@ def infer(args):
         print(f"使用阈值:             {threshold:.4f}")
         print("-"*50)
         region_miss = total_missed / (total_gt_regions + 1e-8)
-        print(f"【区域级】IoU阈值 {args.iou_threshold:.2f}")
+        print(f"【区域级】覆盖率阈值 {args.coverage_threshold:.2f}")
         print(f"缺陷总数:             {total_gt_regions}")
         print(f"检出:                 {total_detected}")
         print(f"漏检:                 {total_missed}  (漏检率 {region_miss:.2%})")
@@ -602,7 +608,7 @@ def infer(args):
             f.write(f"全局IoU: {global_iou:.4f}\n")
             f.write(f"使用阈值: {threshold:.4f}\n")
             f.write(f"TP={total_tp} FP={total_fp} FN={total_fn} TN={total_tn}\n")
-            f.write(f"区域级IoU阈值: {args.iou_threshold:.2f}\n")
+            f.write(f"区域级覆盖率阈值: {args.coverage_threshold:.2f}\n")
             f.write(f"区域级 缺陷总数={total_gt_regions} 检出={total_detected} "
                     f"漏检={total_missed} 误报={total_region_fp}\n")
             f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
@@ -649,8 +655,8 @@ def get_parser():
                         help="anomalib 后处理图像灵敏度（阈值 = 1 - sensitivity）")
     parser.add_argument("--no_gt_as_normal", type=bool, default=False,
                         help="没有GT掩膜的图片当作正常图参与统计（等价于 --assume_normal_if_no_gt）")
-    parser.add_argument("--iou_threshold", type=float, default=0.3,
-                        help="区域级判定的IoU阈值：GT缺陷与预测区域IoU>=该值算检出，否则算漏检")
+    parser.add_argument("--coverage_threshold", type=float, default=0.3,
+                        help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检")
     parser.add_argument("--assume_normal_if_no_gt", type=bool, default=False,
                         help="没有GT掩膜的图片当作正常图统计图像级指标（否则跳过）")
     parser.add_argument("--min_region_area", type=int, default=0,
