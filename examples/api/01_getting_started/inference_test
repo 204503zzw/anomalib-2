@@ -296,20 +296,28 @@ def collect_region_rows(image_path, region_metrics):
     return rows
 
 
-def print_region_details(region_metrics):
-    """打印每个 GT 缺陷的检出/漏检情况，以及误报的预测区域。"""
+def format_region_details(region_metrics):
+    """把每个 GT 缺陷的检出/漏检情况以及误报的预测区域格式化成文本行。"""
+    lines = []
     for r in region_metrics['gt_regions']:
         x, y, w, h = r['bbox']
         state = "检出" if r['status'] == 'detected' else "漏检"
         matched = f" 主匹配预测#{r['matched_pred_id']}" if r['matched_pred_id'] is not None else ""
-        print(f"     GT#{r['gt_id']} {state} 面积={r['area']} 框=({x},{y},{w},{h}) "
-              f"覆盖率={r['covered_ratio']:.2%} IoU={r['best_iou']:.4f}{matched}")
+        lines.append(f"GT#{r['gt_id']} {state} 面积={r['area']} 框=({x},{y},{w},{h}) "
+                     f"覆盖率={r['covered_ratio']:.2%} IoU={r['best_iou']:.4f}{matched}")
     for r in region_metrics['pred_regions']:
         if r['status'] != 'false_alarm':
             continue
         x, y, w, h = r['bbox']
-        print(f"     预测#{r['pred_id']} 误报 面积={r['area']} 框=({x},{y},{w},{h}) "
-              f"IoU={r['best_iou']:.4f} 落入GT比例={r['gt_overlap_ratio']:.2%}")
+        lines.append(f"预测#{r['pred_id']} 误报 面积={r['area']} 框=({x},{y},{w},{h}) "
+                     f"IoU={r['best_iou']:.4f} 落入GT比例={r['gt_overlap_ratio']:.2%}")
+    return lines
+
+
+def print_region_details(region_metrics):
+    """打印每个 GT 缺陷的检出/漏检情况，以及误报的预测区域。"""
+    for line in format_region_details(region_metrics):
+        print(f"     {line}")
 
 
 # ---------- 图像级评估函数 ----------
@@ -516,6 +524,7 @@ def infer(args):
  
     results = []
     region_rows = []
+    region_detail_blocks = []
     total_tp = total_fp = total_fn = total_tn = 0
     total_gt_regions = total_detected = total_missed = total_region_fp = 0
  
@@ -603,6 +612,12 @@ def infer(args):
                       f"最大IoU={region_metrics['region_best_iou']:.4f}")
                 region_rows += collect_region_rows(img_path, region_metrics)
                 print_region_details(region_metrics)
+                region_detail_blocks.append({
+                    'image': Path(img_path).name,
+                    'summary': (f"缺陷={region_metrics['region_gt']} 检出={region_metrics['region_detected']} "
+                                f"漏检={region_metrics['region_missed']} 误报={region_metrics['region_fp']}"),
+                    'lines': format_region_details(region_metrics),
+                })
  
             # 构建结果行
             row = {
@@ -699,6 +714,15 @@ def infer(args):
             f.write(f"阈值: {image_threshold:.4f}\n")
             f.write(f"TP={img_metrics['tp']} FP={img_metrics['fp']} TN={img_metrics['tn']} FN={img_metrics['fn']}\n")
             f.write("=" * 60 + "\n")
+
+            if region_detail_blocks:
+                f.write("\n" + "=" * 60 + "\n")
+                f.write("【区域级逐图明细】\n")
+                for block in region_detail_blocks:
+                    f.write(f"\n{block['image']}  {block['summary']}\n")
+                    for line in block['lines']:
+                        f.write(f"  {line}\n")
+                f.write("=" * 60 + "\n")
         
         print(f"\n汇总报告已保存: {summary_path}")
  
