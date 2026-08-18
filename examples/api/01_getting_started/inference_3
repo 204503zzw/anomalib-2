@@ -153,38 +153,120 @@ def _filter_small_regions(num_labels, labels, min_area):
     return [i for i in range(1, num_labels) if (labels == i).sum() >= min_area]
 
 
+def _region_bbox(region):
+    """返回连通域的外接框 (x, y, w, h)。"""
+    ys, xs = np.nonzero(region)
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    return x0, y0, x1 - x0 + 1, y1 - y0 + 1
+
+
 def compute_region_metrics(pred_mask, gt_mask, iou_threshold=0.3, min_area=0):
     """区域级（每个缺陷）评估：GT 连通域与预测连通域按 IoU 匹配。
 
     每个 GT 缺陷取与它 IoU 最大的预测区域，IoU >= iou_threshold 记为检出，
     否则记为漏检；没有匹配上任何 GT 的预测区域记为误报。
+
+    除汇总计数外，还逐个区域给出明细：
+    - ``gt_regions``: 每个 GT 缺陷的面积、外接框、最佳 IoU、匹配到的预测区域、检出/漏检状态，
+      以及该 GT 被预测覆盖的像素比例；
+    - ``pred_regions``: 每个预测区域的面积、外接框、与 GT 的最佳 IoU、命中/误报状态，
+      以及该预测区域落在 GT 内的像素比例。
     """
     n_gt, gt_labels = cv2.connectedComponents(gt_mask.astype(np.uint8))
     n_pred, pred_labels = cv2.connectedComponents(pred_mask.astype(np.uint8))
     gt_ids = _filter_small_regions(n_gt, gt_labels, min_area)
     pred_ids = _filter_small_regions(n_pred, pred_labels, min_area)
+    pred_masks = {p: pred_labels == p for p in pred_ids}
 
     detected, missed, matched_pred, ious = 0, 0, set(), []
+    gt_details = []
+    pred_best_iou = {p: 0.0 for p in pred_ids}
+    pred_inter = {p: 0 for p in pred_ids}
     for g in gt_ids:
         gt_region = gt_labels == g
-        best_iou, best_pred = 0.0, None
+        gt_area = int(gt_region.sum())
+        best_iou, best_pred, best_inter, covered = 0.0, None, 0, 0
         for p in pred_ids:
-            pred_region = pred_labels == p
-            intersection = np.logical_and(gt_region, pred_region).sum()
+            intersection = int(np.logical_and(gt_region, pred_masks[p]).sum())
             if intersection == 0:
                 continue
-            iou = intersection / np.logical_or(gt_region, pred_region).sum()
+            covered += intersection
+            pred_inter[p] += intersection
+            iou = intersection / np.logical_or(gt_region, pred_masks[p]).sum()
+            pred_best_iou[p] = max(pred_best_iou[p], iou)
             if iou > best_iou:
-                best_iou, best_pred = iou, p
+                best_iou, best_pred, best_inter = iou, p, intersection
         ious.append(best_iou)
-        if best_iou >= iou_threshold:
+        hit = best_iou >= iou_threshold
+        if hit:
             detected += 1
             matched_pred.add(best_pred)
         else:
             missed += 1
+        x, y, w, h = _region_bbox(gt_region)
+        gt_details.append({
+            'gt_id': g, 'area': gt_area, 'bbox': (x, y, w, h),
+            'best_iou': best_iou,
+            'matched_pred_id': best_pred if hit else None,
+            'matched_inter': best_inter if hit else 0,
+            'covered_ratio': covered / (gt_area + 1e-8),
+            'status': 'detected' if hit else 'missed',
+        })
+
+    pred_details = []
+    for p in pred_ids:
+        pred_area = int(pred_masks[p].sum())
+        x, y, w, h = _region_bbox(pred_masks[p])
+        pred_details.append({
+            'pred_id': p, 'area': pred_area, 'bbox': (x, y, w, h),
+            'best_iou': pred_best_iou[p],
+            'gt_overlap_ratio': pred_inter[p] / (pred_area + 1e-8),
+            'status': 'matched' if p in matched_pred else 'false_alarm',
+        })
+
     false_alarm_regions = len(pred_ids) - len(matched_pred)
     return {'region_gt': len(gt_ids), 'region_detected': detected, 'region_missed': missed,
-            'region_fp': false_alarm_regions, 'region_best_iou': max(ious) if ious else 0.0}
+            'region_fp': false_alarm_regions, 'region_best_iou': max(ious) if ious else 0.0,
+            'gt_regions': gt_details, 'pred_regions': pred_details}
+
+
+def collect_region_rows(image_path, region_metrics):
+    """把单张图的区域级明细展开成每个区域一行，供 CSV 输出。"""
+    image_name = Path(image_path).name
+    rows = []
+    for r in region_metrics['gt_regions']:
+        x, y, w, h = r['bbox']
+        rows.append({'image': image_name, 'region_type': 'gt', 'region_id': r['gt_id'],
+                     'status': r['status'], 'area': r['area'],
+                     'bbox_x': x, 'bbox_y': y, 'bbox_w': w, 'bbox_h': h,
+                     'best_iou': round(r['best_iou'], 4),
+                     'matched_id': '' if r['matched_pred_id'] is None else r['matched_pred_id'],
+                     'overlap_ratio': round(r['covered_ratio'], 4)})
+    for r in region_metrics['pred_regions']:
+        x, y, w, h = r['bbox']
+        rows.append({'image': image_name, 'region_type': 'pred', 'region_id': r['pred_id'],
+                     'status': r['status'], 'area': r['area'],
+                     'bbox_x': x, 'bbox_y': y, 'bbox_w': w, 'bbox_h': h,
+                     'best_iou': round(r['best_iou'], 4), 'matched_id': '',
+                     'overlap_ratio': round(r['gt_overlap_ratio'], 4)})
+    return rows
+
+
+def print_region_details(region_metrics):
+    """打印每个 GT 缺陷的检出/漏检情况，以及误报的预测区域。"""
+    for r in region_metrics['gt_regions']:
+        x, y, w, h = r['bbox']
+        state = "检出" if r['status'] == 'detected' else "漏检"
+        matched = f" 匹配预测#{r['matched_pred_id']}" if r['matched_pred_id'] is not None else ""
+        print(f"     GT#{r['gt_id']} {state} 面积={r['area']} 框=({x},{y},{w},{h}) "
+              f"IoU={r['best_iou']:.4f} 覆盖率={r['covered_ratio']:.2%}{matched}")
+    for r in region_metrics['pred_regions']:
+        if r['status'] != 'false_alarm':
+            continue
+        x, y, w, h = r['bbox']
+        print(f"     预测#{r['pred_id']} 误报 面积={r['area']} 框=({x},{y},{w},{h}) "
+              f"IoU={r['best_iou']:.4f} 落入GT比例={r['gt_overlap_ratio']:.2%}")
 
 
 def classify_image(gt_label, pred_label):
@@ -270,6 +352,7 @@ def infer(args):
                 gt_files[f.stem] = f
 
     results = []
+    region_rows = []
     total_tp = total_fp = total_fn = total_tn = 0
     total_gt_regions = total_detected = total_missed = total_region_fp = 0
     image_counts = {"TP": 0, "TN": 0, "FP": 0, "FN": 0, "UNKNOWN": 0}
@@ -324,6 +407,8 @@ def infer(args):
                     print(f"   区域级: 缺陷{region_metrics['region_gt']}个 检出{region_metrics['region_detected']}个 "
                           f"漏检{region_metrics['region_missed']}个 误报{region_metrics['region_fp']}个 "
                           f"最大IoU={region_metrics['region_best_iou']:.4f}")
+                    region_rows += collect_region_rows(img_path, region_metrics)
+                    print_region_details(region_metrics)
                 else:
                     print(f"   警告：{name} 无 anomaly_map，跳过像素级评估")
             else:
@@ -418,6 +503,12 @@ def infer(args):
                     f"漏检={total_missed} 误报={total_region_fp}\n")
             f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
         print(f"汇总报告已保存: {summary_path}")
+
+    # 保存区域级明细CSV
+    if region_rows:
+        region_csv_path = output_dir / "region_detail.csv"
+        pd.DataFrame(region_rows).to_csv(region_csv_path, index=False, encoding="utf-8-sig")
+        print(f"区域级明细已保存: {region_csv_path}")
 
     # 保存CSV
     csv_path = output_dir / "result.csv"
