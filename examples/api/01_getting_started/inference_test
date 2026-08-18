@@ -19,15 +19,85 @@ builtins.open = utf8_open
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
+import importlib
+import importlib.abc
+import importlib.util
+from types import ModuleType
+
 import cv2
 import numpy as np
 import pandas as pd
 import torch
 from jsonargparse import ArgumentParser, ActionConfigFile
 from torch.utils.data import DataLoader
+from torchmetrics import Metric
 from anomalib.data import Folder, PredictDataset
 from anomalib.engine import Engine
 from anomalib.models import get_model
+
+# ---------- 旧版权重兼容 ----------
+class _LegacyMetricStub(Metric):
+    """占位 metric：仅用于反序列化旧 ckpt 里已不存在的 metric 类，不参与任何计算。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__()
+
+    def update(self, *args, **kwargs) -> None:
+        return None
+
+    def compute(self) -> torch.Tensor:
+        return torch.tensor(float("nan"))
+
+
+def _build_legacy_metric_module(fullname: str) -> ModuleType:
+    """构造一个占位模块：属性优先取 anomalib.metrics 里的同名类，否则生成占位 metric。"""
+    module = ModuleType(fullname)
+
+    def __getattr__(name: str):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        metrics = importlib.import_module("anomalib.metrics")
+        attr = getattr(metrics, name, None)
+        if not isinstance(attr, type):
+            attr = type(name, (_LegacyMetricStub,), {"__module__": fullname})
+            print(f">>> 兼容旧权重：{fullname}.{name} 已不存在，使用占位 metric")
+        setattr(module, name, attr)
+        return attr
+
+    module.__getattr__ = __getattr__
+    return module
+
+
+class _LegacyMetricFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """为已被重命名/删除的 anomalib.metrics 子模块提供占位实现。
+
+    ckpt 会 pickle 训练时评估器里的 metric 类；换 anomalib 版本后这些模块可能已经消失
+    （例如 anomalib.metrics.false_negatives_positives 现在叫 anomalib.metrics.pg_pb），
+    torch.load 会因此抛 ModuleNotFoundError。该 finder 挂在 sys.meta_path 末尾，
+    只有正常导入失败时才生效，因此不会影响真实模块的加载。
+    """
+
+    prefix = "anomalib.metrics."
+
+    def find_spec(self, fullname, path=None, target=None):
+        if not fullname.startswith(self.prefix):
+            return None
+        return importlib.util.spec_from_loader(fullname, self)
+
+    def create_module(self, spec):
+        print(f">>> 兼容旧权重：模块 {spec.name} 已不存在，使用占位模块")
+        return _build_legacy_metric_module(spec.name)
+
+    def exec_module(self, module) -> None:
+        return None
+
+
+def install_legacy_metric_compat() -> None:
+    """安装旧 ckpt 的 metric 模块兼容层（重复调用无副作用）。"""
+    if any(isinstance(finder, _LegacyMetricFinder) for finder in sys.meta_path):
+        return
+    sys.meta_path.append(_LegacyMetricFinder())
+
 
 # ---------- 工具函数 ----------
 def safe_imread(path: str) -> np.ndarray:
@@ -482,6 +552,7 @@ def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel', 
 
 # ---------- 主推理函数 ----------
 def infer(args):
+    install_legacy_metric_compat()
     output_dir = Path(args.output)
     heatmap_dir = output_dir / "heatmap"
     overlay_dir = output_dir / "overlay"
