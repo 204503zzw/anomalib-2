@@ -346,7 +346,7 @@ def get_image_level_gt(gt_path):
     gt_mask = load_gt_mask(gt_path)
     return 1 if gt_mask.sum() > 0 else 0
 
-def compute_image_metrics(predictions, gt_files, score_threshold=0.5):
+def compute_image_metrics(predictions, gt_files, score_threshold=0.5, no_gt_as_normal=False):
     """
     计算图像级别的混淆矩阵和评估指标
 
@@ -354,6 +354,7 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5):
         predictions: 模型预测结果列表
         gt_files: GT文件字典 {stem: path}
         score_threshold: 异常分数阈值
+        no_gt_as_normal: gt_files 中缺少 GT 时是否按正常图计入统计
 
     Returns:
         dict: 包含TP, FP, TN, FN及各项指标
@@ -374,6 +375,8 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5):
             gt_label = get_batch_gt_label(pred, i)
             if gt_label is None and name in gt_files:
                 gt_label = get_image_level_gt(gt_files[name])
+            elif gt_label is None and no_gt_as_normal:
+                gt_label = 0
             if gt_label is not None:
                 # 统计混淆矩阵
                 if pred_label == 1 and gt_label == 1:
@@ -434,7 +437,7 @@ def collect_eval_pairs(predictions, gt_dir=None):
     return pairs
 
 
-def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel'):
+def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel', no_gt_as_normal=False):
     """扫描 anomaly_map 二值化回退路径的最佳阈值。
 
     Args:
@@ -442,6 +445,7 @@ def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel'):
         gt_dir: GT目录（测试模式下可为 None，GT 从数据集取）
         num_steps: 扫描步数
         level: 'pixel' 或 'image'
+        no_gt_as_normal: 图像级扫描时，gt_files 中缺少 GT 是否按正常图计入统计
     """
     thresholds = np.linspace(0.0, 1.0, num_steps)
     best_f1, best_th = 0.0, 0.5
@@ -449,7 +453,9 @@ def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel'):
     if level == 'image':
         gt_files = {f.stem: f for f in Path(gt_dir).iterdir() if f.is_file()} if gt_dir else {}
         for th in thresholds:
-            metrics = compute_image_metrics(predictions, gt_files, score_threshold=th)
+            metrics = compute_image_metrics(
+                predictions, gt_files, score_threshold=th, no_gt_as_normal=no_gt_as_normal,
+            )
             if metrics['f1'] > best_f1:
                 best_f1, best_th = metrics['f1'], th
     else:
@@ -525,11 +531,14 @@ def infer(args):
         for f in gt_dir_path.iterdir():
             if f.is_file() and f.suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
                 gt_files[f.stem] = f
+    image_no_gt_as_normal = args.no_gt_as_normal and args.mode == "predict"
 
     # 阈值处理（像素级）
     if args.scan_threshold and (args.gt_dir or args.mode == "test"):
         print(">>> 正在扫描最佳阈值（像素级）...")
-        pixel_threshold = scan_best_threshold(predictions, args.gt_dir, level='pixel')
+        pixel_threshold = scan_best_threshold(
+            predictions, args.gt_dir, level='pixel', no_gt_as_normal=image_no_gt_as_normal,
+        )
     else:
         pixel_threshold = args.threshold
     print(f">>> 使用像素级回退阈值: {pixel_threshold:.4f}（仅在缺少 anomalib pred_mask 时，对 anomaly_map 二值化使用）")
@@ -550,7 +559,9 @@ def infer(args):
     # 图像级阈值
     if args.scan_image_threshold and (args.gt_dir or args.mode == "test"):
         print(">>> 正在扫描最佳阈值（图像级）...")
-        image_threshold = scan_best_threshold(predictions, args.gt_dir, level='image')
+        image_threshold = scan_best_threshold(
+            predictions, args.gt_dir, level='image', no_gt_as_normal=image_no_gt_as_normal,
+        )
     else:
         image_threshold = args.image_threshold
     print(f">>> 使用图像级阈值: {image_threshold:.4f}")
@@ -706,7 +717,9 @@ def infer(args):
 
     # ========== 图像级全局汇总 ==========
     if args.mode == "test" or (args.gt_dir and len(gt_files) > 0):
-        img_metrics = compute_image_metrics(predictions, gt_files, score_threshold=image_threshold)
+        img_metrics = compute_image_metrics(
+            predictions, gt_files, score_threshold=image_threshold, no_gt_as_normal=image_no_gt_as_normal,
+        )
 
         print("\n" + "="*60)
         print("【图像级全局评估结果】")
@@ -797,7 +810,7 @@ def get_parser():
     parser.add_argument("--scan_threshold", type=bool, default=False,
                         help="是否自动扫描 anomaly_map 回退路径的最佳阈值（像素级）")
     parser.add_argument("--no_gt_as_normal", type=bool, default=False,
-                        help="gt_dir 中找不到 GT 的图视为正常图（全零 mask）并计入像素级指标")
+                        help="predict 模式下 gt_dir 中找不到 GT 的图视为正常图，并计入像素级和图像级指标")
     # 图像级评估参数
     parser.add_argument("--image_threshold", type=float, default=0.5, help="图像级异常分数阈值（默认0.5）")
     parser.add_argument("--scan_image_threshold", type=bool, default=False, help="是否自动扫描最佳阈值（图像级）")
