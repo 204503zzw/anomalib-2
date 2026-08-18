@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- 📚 **docs**: Add SuperADD training example script under `examples/api/03_models/super_add.py`
+
 ### Removed
 
 ### Changed
