@@ -79,6 +79,11 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
             averages small anomalies away. A value of ``1`` disables pooling, which is
             recommended for transformer backbones whose tokens already cover a large
             receptive field. Defaults to ``3``.
+        blur_sigma (int, optional): Standard deviation of the Gaussian blur applied to
+            the upsampled anomaly map. Must be a positive integer. Large values give
+            smooth heatmaps but flatten the peaks of small defects, so a small value
+            such as ``1`` helps when the defects are only a few pixels wide.
+            Defaults to ``4``.
 
     Example:
         >>> from anomalib.models.image.patchcore.torch_model import PatchcoreModel
@@ -119,10 +124,14 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
         pre_trained: bool = True,
         num_neighbors: int = 9,
         feature_pool_size: int = 3,
+        blur_sigma: int = 4,
     ) -> None:
         super().__init__()
         if feature_pool_size < 1 or feature_pool_size % 2 == 0:
             msg = f"feature_pool_size must be a positive odd integer, got {feature_pool_size}."
+            raise ValueError(msg)
+        if blur_sigma < 1:
+            msg = f"blur_sigma must be a positive integer, got {blur_sigma}."
             raise ValueError(msg)
         self.tiler: Tiler | None = None
 
@@ -139,7 +148,8 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
         self.feature_pooler: nn.Module = (
             nn.Identity() if feature_pool_size == 1 else nn.AvgPool2d(feature_pool_size, 1, feature_pool_size // 2)
         )
-        self.anomaly_map_generator = AnomalyMapGenerator()
+        self.blur_sigma = blur_sigma
+        self.anomaly_map_generator = AnomalyMapGenerator(sigma=blur_sigma)
         self.memory_bank: torch.Tensor
         self.register_buffer("memory_bank", torch.empty(0))
         self.embedding_store: list[torch.tensor] = []
