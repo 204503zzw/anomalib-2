@@ -22,3 +22,19 @@ def test_blur_equivalence(kernel_size: tuple[int, int], sigma: tuple[int, int], 
         gaussian = GaussianBlur2d(kernel_size=kernel_size, sigma=sigma, channels=channels)
         blur_gaussian = gaussian(input_tensor)
         torch.testing.assert_close(blur_kornia, blur_gaussian)
+
+
+def test_kernel_is_not_in_state_dict() -> None:
+    """The kernel is derived from the constructor arguments and is not checkpointed."""
+    assert GaussianBlur2d(sigma=1.0).state_dict() == {}
+
+
+def test_load_state_dict_ignores_stored_kernel() -> None:
+    """Kernels stored by older checkpoints are ignored, even with a different sigma."""
+    legacy_state_dict = {"blur.kernel": GaussianBlur2d(sigma=4.0).kernel.clone()}
+    module = torch.nn.Module()
+    module.blur = GaussianBlur2d(sigma=1.0)
+
+    module.load_state_dict(legacy_state_dict, strict=True)
+
+    assert module.blur.kernel.shape[-2:] == (9, 9)

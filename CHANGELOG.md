@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- 🐞 **components**: Stop checkpointing the `GaussianBlur2d` kernel so that changing the blur sigma (e.g. PatchCore's `blur_sigma`) no longer raises a state-dict size mismatch when loading existing checkpoints
+
 ## [v2.6.0] - 2026-07-24
 
 ### Added
