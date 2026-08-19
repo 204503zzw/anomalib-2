@@ -93,6 +93,10 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
             subsample embeddings. Defaults to ``0.1``.
         num_neighbors (int, optional): Number of nearest neighbors to use.
             Defaults to ``9``.
+        feature_pool_size (int, optional): Kernel size of the average pooling applied to
+            the backbone features. Must be a positive odd integer; ``1`` disables
+            pooling, which improves the detection of small defects and is recommended
+            for transformer backbones. Defaults to ``3``.
         precision (str | PrecisionType, optional): Precision type for model computations.
             Can be either a string (``"float32"``, ``"float16"``) or a :class:`PrecisionType` enum value.
             Defaults to ``PrecisionType.FLOAT32``.
@@ -145,6 +149,7 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
         pre_trained: bool = True,
         coreset_sampling_ratio: float = 0.1,
         num_neighbors: int = 9,
+        feature_pool_size: int = 3,
         precision: str | PrecisionType = PrecisionType.FLOAT32,
         pre_processor: nn.Module | bool = True,
         post_processor: nn.Module | bool = True,
@@ -163,6 +168,7 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
             pre_trained=pre_trained,
             layers=layers,
             num_neighbors=num_neighbors,
+            feature_pool_size=feature_pool_size,
         )
         self.coreset_sampling_ratio = coreset_sampling_ratio
 

@@ -73,6 +73,12 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
             Defaults to ``True``.
         num_neighbors (int, optional): Number of nearest neighbors to use.
             Defaults to ``9``.
+        feature_pool_size (int, optional): Kernel size of the average pooling applied
+            to the feature maps before they enter the memory bank. Must be a positive
+            odd integer. Pooling adds local context to each patch embedding, but also
+            averages small anomalies away. A value of ``1`` disables pooling, which is
+            recommended for transformer backbones whose tokens already cover a large
+            receptive field. Defaults to ``3``.
 
     Example:
         >>> from anomalib.models.image.patchcore.torch_model import PatchcoreModel
@@ -88,7 +94,8 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
     Attributes:
         tiler (Tiler | None): Optional tiler for processing large images.
         feature_extractor (TimmFeatureExtractor): CNN feature extractor.
-        feature_pooler (torch.nn.AvgPool2d): Average pooling layer.
+        feature_pooler (nn.Module): Average pooling layer, or ``nn.Identity`` when
+            ``feature_pool_size`` is ``1``.
         anomaly_map_generator (AnomalyMapGenerator): Generates anomaly heatmaps.
         memory_bank (torch.Tensor): Storage for patch features from training.
 
@@ -111,8 +118,12 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
         backbone: str = "wide_resnet50_2",
         pre_trained: bool = True,
         num_neighbors: int = 9,
+        feature_pool_size: int = 3,
     ) -> None:
         super().__init__()
+        if feature_pool_size < 1 or feature_pool_size % 2 == 0:
+            msg = f"feature_pool_size must be a positive odd integer, got {feature_pool_size}."
+            raise ValueError(msg)
         self.tiler: Tiler | None = None
 
         self.backbone = backbone
@@ -124,7 +135,10 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
             pre_trained=pre_trained,
             layers=self.layers,
         ).eval()
-        self.feature_pooler = torch.nn.AvgPool2d(3, 1, 1)
+        self.feature_pool_size = feature_pool_size
+        self.feature_pooler: nn.Module = (
+            nn.Identity() if feature_pool_size == 1 else nn.AvgPool2d(feature_pool_size, 1, feature_pool_size // 2)
+        )
         self.anomaly_map_generator = AnomalyMapGenerator()
         self.memory_bank: torch.Tensor
         self.register_buffer("memory_bank", torch.empty(0))
