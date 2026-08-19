@@ -74,6 +74,11 @@ class GaussianBlur2d(nn.Module):
         >>> output = blur(x)
         >>> output.shape
         torch.Size([1, 3, 64, 64])
+
+    Notes:
+        The kernel is fully determined by the constructor arguments, so it is a
+        non-persistent buffer. Checkpoints therefore stay valid when ``sigma`` or
+        ``kernel_size`` change, and kernels stored by older checkpoints are ignored.
     """
 
     def __init__(
@@ -95,7 +100,7 @@ class GaussianBlur2d(nn.Module):
             kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
 
         self.kernel: torch.Tensor
-        self.register_buffer("kernel", get_gaussian_kernel2d(kernel_size=kernel_size, sigma=sigma))
+        self.register_buffer("kernel", get_gaussian_kernel2d(kernel_size=kernel_size, sigma=sigma), persistent=False)
         if normalize:
             self.kernel = normalize_kernel2d(self.kernel)
 
@@ -106,6 +111,18 @@ class GaussianBlur2d(nn.Module):
         self.padding = padding
         self.height, self.width = self.kernel.shape[-2:]
         self.padding_shape = _compute_padding([self.height, self.width])
+
+    def _load_from_state_dict(self, state_dict: dict, prefix: str, *args, **kwargs) -> None:
+        """Drop kernels stored by checkpoints created before the buffer became non-persistent.
+
+        Args:
+            state_dict (dict): State dict that is being loaded.
+            prefix (str): Prefix of this module's entries in ``state_dict``.
+            *args: Remaining positional arguments of ``nn.Module._load_from_state_dict``.
+            **kwargs: Remaining keyword arguments of ``nn.Module._load_from_state_dict``.
+        """
+        state_dict.pop(prefix + "kernel", None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
         """Apply Gaussian blur to input tensor.
