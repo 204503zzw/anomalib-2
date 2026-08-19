@@ -97,6 +97,10 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
             the backbone features. Must be a positive odd integer; ``1`` disables
             pooling, which improves the detection of small defects and is recommended
             for transformer backbones. Defaults to ``3``.
+        blur_sigma (int, optional): Standard deviation of the Gaussian blur applied to
+            the anomaly map. Must be a positive integer. Smaller values keep the peaks
+            of small defects sharp, larger values give smoother heatmaps.
+            Defaults to ``4``.
         precision (str | PrecisionType, optional): Precision type for model computations.
             Can be either a string (``"float32"``, ``"float16"``) or a :class:`PrecisionType` enum value.
             Defaults to ``PrecisionType.FLOAT32``.
@@ -150,6 +154,7 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
         coreset_sampling_ratio: float = 0.1,
         num_neighbors: int = 9,
         feature_pool_size: int = 3,
+        blur_sigma: int = 4,
         precision: str | PrecisionType = PrecisionType.FLOAT32,
         pre_processor: nn.Module | bool = True,
         post_processor: nn.Module | bool = True,
@@ -169,6 +174,7 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
             layers=layers,
             num_neighbors=num_neighbors,
             feature_pool_size=feature_pool_size,
+            blur_sigma=blur_sigma,
         )
         self.coreset_sampling_ratio = coreset_sampling_ratio
 

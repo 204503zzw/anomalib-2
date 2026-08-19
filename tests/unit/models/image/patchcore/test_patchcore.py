@@ -4,7 +4,7 @@
 """Unit tests for the PatchCore model.
 
 Covers the configurable feature pooling that controls how much local context is
-averaged into each patch embedding.
+averaged into each patch embedding, and the configurable anomaly map blur.
 """
 
 import pytest
@@ -67,3 +67,41 @@ def test_lightning_model_forwards_feature_pool_size() -> None:
     """The Lightning module passes the pool size to the torch model."""
     model = Patchcore(backbone="resnet18", layers=["layer1"], pre_trained=False, feature_pool_size=1)
     assert isinstance(model.model.feature_pooler, nn.Identity)
+
+
+def test_default_blur_sigma() -> None:
+    """Default configuration keeps the sigma of four used by the paper implementation."""
+    model = _model()
+    assert model.blur_sigma == 4
+    assert model.anomaly_map_generator.blur.kernel.shape[-2:] == (33, 33)
+
+
+@pytest.mark.parametrize("blur_sigma", [1, 2])
+def test_blur_sigma_sets_kernel_size(blur_sigma: int) -> None:
+    """The blur kernel is derived from the requested sigma."""
+    model = _model(blur_sigma=blur_sigma)
+    expected = 2 * int(4.0 * blur_sigma + 0.5) + 1
+    assert model.anomaly_map_generator.blur.kernel.shape[-2:] == (expected, expected)
+
+
+@pytest.mark.parametrize("blur_sigma", [0, -1])
+def test_invalid_blur_sigma(blur_sigma: int) -> None:
+    """Non-positive sigmas are rejected."""
+    with pytest.raises(ValueError, match="blur_sigma"):
+        _model(blur_sigma=blur_sigma)
+
+
+def test_small_blur_sigma_keeps_peak() -> None:
+    """A small sigma retains more of a single-pixel anomaly peak than the default."""
+    patch_scores = torch.zeros(1, 1, 32, 32)
+    patch_scores[0, 0, 16, 16] = 1.0
+    sharp = _model(blur_sigma=1).anomaly_map_generator(patch_scores)
+    smooth = _model().anomaly_map_generator(patch_scores)
+    assert sharp.amax() > smooth.amax()
+
+
+def test_lightning_model_forwards_blur_sigma() -> None:
+    """The Lightning module passes the blur sigma to the torch model."""
+    model = Patchcore(backbone="resnet18", layers=["layer1"], pre_trained=False, blur_sigma=1)
+    assert model.model.blur_sigma == 1
+    assert model.model.anomaly_map_generator.blur.kernel.shape[-2:] == (9, 9)
