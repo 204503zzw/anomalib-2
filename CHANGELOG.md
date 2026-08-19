@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- 🚀 **model**: Add `feature_pool_size` to PatchCore to control (or disable) the average pooling of backbone features, improving small-defect detection with ViT backbones
+
 ### Removed
 
 ### Changed
