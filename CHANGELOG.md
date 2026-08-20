@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - 🚀 **model**: Add `feature_pool_size` to PatchCore to control (or disable) the average pooling of backbone features, improving small-defect detection with ViT backbones
 - 🚀 **model**: Add `blur_sigma` to PatchCore to control the Gaussian smoothing of the anomaly map, keeping the peaks of small defects sharp
+- 🚀 **pipelines**: Add a `runs` section to the benchmark config to queue an explicit list of named parameter sets instead of a grid search, each saving its results to `<output_dir>/<name>/results.csv`
 
 ### Removed
 

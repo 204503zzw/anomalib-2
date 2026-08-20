@@ -57,3 +57,15 @@ written as `grid: [...]` to queue one training run per combination:
 ```bash
 anomalib benchmark --config configs/benchmark/patchcore_folder.yaml
 ```
+
+All runs share a single `runs/benchmark/<timestamp>/results.csv`.
+
+To run a hand-picked list of parameter sets instead of the cartesian product, list them
+under `runs`. They are executed one after the other and each one writes its own
+`<output_dir>/<name>/results.csv`:
+
+```bash
+anomalib benchmark --config configs/benchmark/patchcore_folder_runs.yaml
+```
+
+Keys defined next to `runs` act as defaults that every run inherits and can override.

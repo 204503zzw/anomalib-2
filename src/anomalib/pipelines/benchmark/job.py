@@ -1,4 +1,4 @@
-# Copyright (C) 2024 Intel Corporation
+# Copyright (C) 2024-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Benchmarking job for evaluating model performance.
@@ -33,10 +33,12 @@ comparison across different model-dataset combinations.
 
 import logging
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 from lightning import seed_everything
@@ -92,6 +94,10 @@ class BenchmarkJob(Job):
     """
 
     name = "benchmark"
+
+    # Directory the next call to ``save`` writes to. When ``None`` a timestamped
+    # directory under ``runs/benchmark`` is used.
+    _output_dir: ClassVar[Path | None] = None
 
     def __init__(
         self,
@@ -183,18 +189,42 @@ class BenchmarkJob(Job):
                 output[key].append(value)
         return pd.DataFrame(output)
 
+    @classmethod
+    @contextmanager
+    def output_directory(cls, output_dir: str | Path | None) -> Generator[None, None, None]:
+        """Redirect the results of the enclosed runs to ``output_dir``.
+
+        Args:
+            output_dir (str | Path | None): Directory in which ``results.csv`` is
+                written. When ``None`` the default timestamped directory is used.
+
+        Example:
+            >>> with BenchmarkJob.output_directory("runs/my_experiment"):
+            ...     runner.run(args)
+        """
+        previous = cls._output_dir
+        cls._output_dir = Path(output_dir) if output_dir is not None else None
+        try:
+            yield
+        finally:
+            cls._output_dir = previous
+
     @staticmethod
     def save(result: pd.DataFrame) -> None:
         """Save benchmark results to CSV file.
 
-        The results are saved in the ``runs/benchmark/YYYY-MM-DD-HH_MM_SS``
-        directory. The method also prints a tabular view of the results.
+        The results are saved to the directory set by :meth:`output_directory`, or
+        to ``runs/benchmark/YYYY-MM-DD-HH_MM_SS`` when none is set. The method also
+        prints a tabular view of the results.
 
         Args:
             result (pd.DataFrame): DataFrame containing benchmark results to save.
         """
         BenchmarkJob._print_tabular_results(result)
-        file_path = Path("runs") / BenchmarkJob.name / datetime.now().strftime("%Y-%m-%d-%H_%M_%S") / "results.csv"
+        output_dir = BenchmarkJob._output_dir or (
+            Path("runs") / BenchmarkJob.name / datetime.now().strftime("%Y-%m-%d-%H_%M_%S")
+        )
+        file_path = output_dir / "results.csv"
         file_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(file_path, index=False)
         logger.info(f"Saved results to {file_path}")

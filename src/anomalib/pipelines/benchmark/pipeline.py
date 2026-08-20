@@ -1,4 +1,4 @@
-# Copyright (C) 2024 Intel Corporation
+# Copyright (C) 2024-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Benchmarking pipeline for evaluating anomaly detection models.
@@ -30,6 +30,28 @@ Configuration:
 
     The ``grid`` key creates multiple jobs for each combination of values.
 
+    Instead of a single (grid searched) configuration, a list of named runs can be
+    given under ``runs``. The runs are executed one after the other and each one
+    writes its own ``results.csv``::
+
+        accelerator: cpu
+        benchmark:
+          output_dir: runs/my_experiment
+          seed: 42
+          data:
+            class_path: MVTecAD
+          runs:
+            - name: padim
+              model:
+                class_path: Padim
+            - name: patchcore
+              model:
+                class_path: Patchcore
+
+    Keys defined next to ``runs`` (``seed`` and ``data`` above) are used as defaults
+    for every run and can be overridden per run. Results are written to
+    ``<output_dir>/<name>/results.csv``.
+
 Example:
     Run the benchmark with a config file:
 
@@ -57,12 +79,26 @@ using parallel execution when multiple GPUs are available and serial execution
 otherwise.
 """
 
+import logging
+from copy import deepcopy
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 import torch
+from jsonargparse import Namespace
 
 from anomalib.pipelines.components.base import Pipeline, Runner
+from anomalib.pipelines.components.base.pipeline import log_file
 from anomalib.pipelines.components.runners import ParallelRunner, SerialRunner
+from anomalib.utils.logging import redirect_logs
 
 from .generator import BenchmarkJobGenerator
+from .job import BenchmarkJob
+
+if TYPE_CHECKING:
+    from anomalib.pipelines.types import PREV_STAGE_RESULT
+
+logger = logging.getLogger(__name__)
 
 
 class Benchmark(Pipeline):
@@ -123,3 +159,57 @@ class Benchmark(Pipeline):
             else:
                 runners.append(ParallelRunner(BenchmarkJobGenerator(accelerator), n_jobs=device_count))
         return runners
+
+    def run(self, args: Namespace | None = None) -> None:
+        """Run the benchmark pipeline.
+
+        When the configuration contains a ``runs`` list, each entry is executed
+        sequentially and its results are saved to a separate directory. Otherwise the
+        default single-configuration behaviour is used.
+
+        Args:
+            args (Namespace | None): Arguments to run the pipeline. These are the args
+                returned by ``ArgumentParser``.
+        """
+        pipeline_args = self._get_args(args)
+        benchmark_args = pipeline_args.get(BenchmarkJob.name) or {}
+        runs = benchmark_args.get("runs")
+        redirect_logs(log_file)
+
+        if not runs:
+            self._run_group(pipeline_args, benchmark_args, benchmark_args.get("output_dir"))
+            return
+
+        defaults = {key: value for key, value in benchmark_args.items() if key not in {"runs", "output_dir"}}
+        output_dir = Path(benchmark_args.get("output_dir", Path("runs") / BenchmarkJob.name))
+        for index, run in enumerate(runs):
+            run_args = _merge(defaults, run)
+            name = str(run_args.setdefault("name", f"run_{index}"))
+            logger.info(f"Running benchmark run '{name}' ({index + 1}/{len(runs)})")
+            self._run_group(pipeline_args, run_args, output_dir / name)
+
+    def _run_group(self, pipeline_args: dict, job_args: dict, output_dir: str | Path | None) -> None:
+        """Execute the runners once for a single set of job arguments."""
+        previous_results: PREV_STAGE_RESULT = None
+        for runner in self._setup_runners(pipeline_args):
+            try:
+                with BenchmarkJob.output_directory(output_dir):
+                    previous_results = runner.run(job_args, previous_results)
+            except Exception:  # noqa: PERF203 catch all exception and allow try-catch in loop
+                logger.exception("An error occurred when running the runner.")
+                print(
+                    f"There were some errors when running {runner.generator.job_class.name} with"
+                    f" {runner.__class__.__name__}."
+                    f" Please check {log_file} for more details.",
+                )
+
+
+def _merge(defaults: dict, overrides: dict) -> dict:
+    """Recursively merge ``overrides`` into a copy of ``defaults``."""
+    merged = deepcopy(defaults)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
