@@ -375,12 +375,33 @@ def collect_gt_area_records(image_path, region_metrics):
             for r in region_metrics['gt_regions']]
 
 
+def parse_area_bins(edges):
+    """把分箱边界归一化成升序正整数列表。
+
+    兼容 CLI 传入的字符串元素（jsonargparse 的 ``type=list`` 不做元素转换），
+    以及 ``"4,8,16"`` / ``"[4, 8, 16]"`` 这样的整串写法。
+    """
+    if edges is None:
+        return []
+    if isinstance(edges, str):
+        edges = edges.strip().strip("[]").split(",")
+    values = set()
+    for e in edges:
+        text = str(e).strip().strip("[]")
+        if not text:
+            continue
+        value = int(float(text))
+        if value > 0:
+            values.add(value)
+    return sorted(values)
+
+
 def summarize_area_bins(records, edges):
     """按缺陷面积分箱统计检出/漏检数量。
 
     edges 为升序的面积分界值（像素数），生成 (0, e1]、(e1, e2] ... (en, inf) 各区间。
     """
-    edges = sorted({int(e) for e in edges if e > 0})
+    edges = parse_area_bins(edges)
     bounds = [(0, edges[0])] if edges else []
     bounds += [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
     bounds.append((edges[-1] if edges else 0, float('inf')))
@@ -970,8 +991,8 @@ def get_parser():
                         help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检")
     parser.add_argument("--min_region_area", type=int, default=0,
                         help="忽略面积小于该值的连通域（像素数），用于过滤噪点")
-    parser.add_argument("--area_bins", type=list, default=DEFAULT_AREA_BINS,
-                        help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率")
+    parser.add_argument("--area_bins", type=list[int], default=DEFAULT_AREA_BINS,
+                        help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率，如 [4,8,16,32]")
     return parser
 
 if __name__ == "__main__":
