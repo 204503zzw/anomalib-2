@@ -364,6 +364,74 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=
             'gt_regions': gt_details, 'pred_regions': pred_details}
 
 
+DEFAULT_AREA_BINS = [16, 64, 256, 1024, 4096]
+
+
+def collect_gt_area_records(image_path, region_metrics):
+    """收集每个 GT 缺陷的面积与检出状态，供面积分箱统计使用。"""
+    image_name = Path(image_path).name
+    return [{'image': image_name, 'gt_id': r['gt_id'], 'area': r['area'],
+             'status': r['status'], 'covered_ratio': r['covered_ratio']}
+            for r in region_metrics['gt_regions']]
+
+
+def summarize_area_bins(records, edges):
+    """按缺陷面积分箱统计检出/漏检数量。
+
+    edges 为升序的面积分界值（像素数），生成 (0, e1]、(e1, e2] ... (en, inf) 各区间。
+    """
+    edges = sorted({int(e) for e in edges if e > 0})
+    bounds = [(0, edges[0])] if edges else []
+    bounds += [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+    bounds.append((edges[-1] if edges else 0, float('inf')))
+
+    rows = []
+    for low, high in bounds:
+        in_bin = [r for r in records if low < r['area'] <= high]
+        missed = sum(1 for r in in_bin if r['status'] == 'missed')
+        total = len(in_bin)
+        label = f"({low}, {high}]" if high != float('inf') else f"> {low}"
+        rows.append({'range': label, 'total': total, 'detected': total - missed,
+                     'missed': missed, 'miss_rate': missed / (total + 1e-8)})
+    return rows
+
+
+def summarize_missed_areas(records):
+    """漏检缺陷与检出缺陷的面积分布对比。"""
+    missed = np.array([r['area'] for r in records if r['status'] == 'missed'], dtype=float)
+    detected = np.array([r['area'] for r in records if r['status'] == 'detected'], dtype=float)
+
+    def stats(areas):
+        if areas.size == 0:
+            return None
+        return {'count': int(areas.size), 'min': float(areas.min()), 'p25': float(np.percentile(areas, 25)),
+                'median': float(np.median(areas)), 'mean': float(areas.mean()),
+                'p75': float(np.percentile(areas, 75)), 'max': float(areas.max())}
+
+    return {'missed': stats(missed), 'detected': stats(detected)}
+
+
+def format_area_summary(records, edges):
+    """把面积分箱统计与漏检面积分布格式化成文本行。"""
+    if not records:
+        return []
+    lines = ["【漏检缺陷面积统计】面积单位为像素，基于评估分辨率下的 GT 连通域",
+             f"{'面积区间':>16} {'缺陷数':>8} {'检出':>8} {'漏检':>8} {'漏检率':>10}"]
+    for row in summarize_area_bins(records, edges):
+        lines.append(f"{row['range']:>16} {row['total']:>8} {row['detected']:>8} "
+                     f"{row['missed']:>8} {row['miss_rate']:>9.2%}")
+
+    dist = summarize_missed_areas(records)
+    for key, title in (('missed', '漏检缺陷面积'), ('detected', '检出缺陷面积')):
+        s = dist[key]
+        if s is None:
+            lines.append(f"{title}: 无")
+            continue
+        lines.append(f"{title}: n={s['count']} min={s['min']:.0f} p25={s['p25']:.0f} "
+                     f"中位数={s['median']:.0f} 均值={s['mean']:.1f} p75={s['p75']:.0f} max={s['max']:.0f}")
+    return lines
+
+
 def collect_region_rows(image_path, region_metrics):
     """把单张图的区域级明细展开成每个区域一行，供 CSV 输出。"""
     image_name = Path(image_path).name
@@ -637,6 +705,7 @@ def infer(args):
 
     results = []
     region_rows = []
+    gt_area_records = []
     region_detail_blocks = []
     total_tp = total_fp = total_fn = total_tn = 0
     total_gt_regions = total_detected = total_missed = total_region_fp = 0
@@ -724,6 +793,7 @@ def infer(args):
                       f"漏检{region_metrics['region_missed']}个 误报{region_metrics['region_fp']}个 "
                       f"最大IoU={region_metrics['region_best_iou']:.4f}")
                 region_rows += collect_region_rows(img_path, region_metrics)
+                gt_area_records += collect_gt_area_records(img_path, region_metrics)
                 print_region_details(region_metrics)
                 region_detail_blocks.append({
                     'image': Path(img_path).name,
@@ -782,6 +852,11 @@ def infer(args):
         print(f"检出:                 {total_detected}")
         print(f"漏检:                 {total_missed}  (漏检率 {region_miss:.2%})")
         print(f"误报区域:             {total_region_fp}")
+        area_summary_lines = format_area_summary(gt_area_records, args.area_bins)
+        if area_summary_lines:
+            print("-"*60)
+            for line in area_summary_lines:
+                print(line)
         print("="*60)
 
     # ========== 图像级全局汇总 ==========
@@ -819,6 +894,8 @@ def infer(args):
                 f.write(f"区域级 缺陷总数={total_gt_regions} 检出={total_detected} "
                         f"漏检={total_missed} 误报={total_region_fp}\n")
                 f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
+                for line in format_area_summary(gt_area_records, args.area_bins):
+                    f.write(line + "\n")
 
             f.write("\n" + "=" * 60 + "\n")
             f.write("【图像级评估】\n")
@@ -893,6 +970,8 @@ def get_parser():
                         help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检")
     parser.add_argument("--min_region_area", type=int, default=0,
                         help="忽略面积小于该值的连通域（像素数），用于过滤噪点")
+    parser.add_argument("--area_bins", type=list, default=DEFAULT_AREA_BINS,
+                        help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率")
     return parser
 
 if __name__ == "__main__":
