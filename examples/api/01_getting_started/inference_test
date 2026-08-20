@@ -23,6 +23,7 @@ import importlib
 import importlib.abc
 import importlib.util
 from types import ModuleType
+from typing import Union
 
 import cv2
 import numpy as np
@@ -378,13 +379,13 @@ def collect_gt_area_records(image_path, region_metrics):
 def parse_area_bins(edges):
     """把分箱边界归一化成升序正整数列表。
 
-    兼容 CLI 传入的字符串元素（jsonargparse 的 ``type=list`` 不做元素转换），
-    以及 ``"4,8,16"`` / ``"[4, 8, 16]"`` 这样的整串写法。
+    兼容 CLI 传入的字符串元素、``"4,8,16"`` / ``"[4, 8, 16]"`` 这样的整串写法，
+    以及中文全角逗号。
     """
     if edges is None:
         return []
     if isinstance(edges, str):
-        edges = edges.strip().strip("[]").split(",")
+        edges = edges.replace("，", ",").strip().strip("[]").split(",")
     values = set()
     for e in edges:
         text = str(e).strip().strip("[]")
@@ -991,8 +992,8 @@ def get_parser():
                         help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检")
     parser.add_argument("--min_region_area", type=int, default=0,
                         help="忽略面积小于该值的连通域（像素数），用于过滤噪点")
-    parser.add_argument("--area_bins", type=list[int], default=DEFAULT_AREA_BINS,
-                        help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率，如 [4,8,16,32]")
+    parser.add_argument("--area_bins", type=Union[str, list[int]], default=DEFAULT_AREA_BINS,
+                        help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率，如 [4,8,16,32] 或 4,8,16,32")
     return parser
 
 if __name__ == "__main__":
