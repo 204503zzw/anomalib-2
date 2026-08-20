@@ -413,8 +413,11 @@ def summarize_area_bins(records, edges):
         missed = sum(1 for r in in_bin if r['status'] == 'missed')
         total = len(in_bin)
         label = f"({low}, {high}]" if high != float('inf') else f"> {low}"
+        missed_items = sorted(((r['image'], r['area']) for r in in_bin if r['status'] == 'missed'),
+                              key=lambda t: (t[0], t[1]))
         rows.append({'range': label, 'total': total, 'detected': total - missed,
-                     'missed': missed, 'miss_rate': missed / (total + 1e-8)})
+                     'missed': missed, 'miss_rate': missed / (total + 1e-8),
+                     'missed_items': missed_items})
     return rows
 
 
@@ -433,15 +436,31 @@ def summarize_missed_areas(records):
     return {'missed': stats(missed), 'detected': stats(detected)}
 
 
-def format_area_summary(records, edges):
-    """把面积分箱统计与漏检面积分布格式化成文本行。"""
+def format_area_summary(records, edges, max_examples=0):
+    """把面积分箱统计与漏检面积分布格式化成文本行。
+
+    max_examples 控制每个面积区间列出多少张漏检图片名：0 表示全部列出，
+    正数表示最多列 N 条，负数表示不列。
+    """
     if not records:
         return []
     lines = ["【漏检缺陷面积统计】面积单位为像素，基于评估分辨率下的 GT 连通域",
              f"{'面积区间':>16} {'缺陷数':>8} {'检出':>8} {'漏检':>8} {'漏检率':>10}"]
-    for row in summarize_area_bins(records, edges):
+    rows = summarize_area_bins(records, edges)
+    for row in rows:
         lines.append(f"{row['range']:>16} {row['total']:>8} {row['detected']:>8} "
                      f"{row['missed']:>8} {row['miss_rate']:>9.2%}")
+
+    if max_examples >= 0 and any(row['missed'] for row in rows):
+        lines.append("【各面积区间的漏检图片】格式为 图片名(缺陷面积)")
+        for row in rows:
+            if not row['missed']:
+                continue
+            shown = row['missed_items'] if max_examples == 0 else row['missed_items'][:max_examples]
+            text = ", ".join(f"{name}({area})" for name, area in shown)
+            if len(row['missed_items']) > len(shown):
+                text += f" ... 共 {len(row['missed_items'])} 个"
+            lines.append(f"  {row['range']}: {text}")
 
     dist = summarize_missed_areas(records)
     for key, title in (('missed', '漏检缺陷面积'), ('detected', '检出缺陷面积')):
@@ -874,7 +893,7 @@ def infer(args):
         print(f"检出:                 {total_detected}")
         print(f"漏检:                 {total_missed}  (漏检率 {region_miss:.2%})")
         print(f"误报区域:             {total_region_fp}")
-        area_summary_lines = format_area_summary(gt_area_records, args.area_bins)
+        area_summary_lines = format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples)
         if area_summary_lines:
             print("-"*60)
             for line in area_summary_lines:
@@ -916,7 +935,7 @@ def infer(args):
                 f.write(f"区域级 缺陷总数={total_gt_regions} 检出={total_detected} "
                         f"漏检={total_missed} 误报={total_region_fp}\n")
                 f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
-                for line in format_area_summary(gt_area_records, args.area_bins):
+                for line in format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples):
                     f.write(line + "\n")
 
             f.write("\n" + "=" * 60 + "\n")
@@ -994,6 +1013,8 @@ def get_parser():
                         help="忽略面积小于该值的连通域（像素数），用于过滤噪点")
     parser.add_argument("--area_bins", type=Union[str, list[int]], default=DEFAULT_AREA_BINS,
                         help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率，如 [4,8,16,32] 或 4,8,16,32")
+    parser.add_argument("--area_bin_examples", type=int, default=0,
+                        help="每个面积区间列出多少张漏检图片名：0=全部列出，N>0=最多 N 条，负数=不列")
     return parser
 
 if __name__ == "__main__":
