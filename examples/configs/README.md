@@ -48,3 +48,12 @@ anomalib fit -c configs/model/padim.yaml --data configs/data/mvtec.yaml
 ```bash
 anomalib fit -c configs/model/stfpm.yaml --data configs/data/visa.yaml
 ```
+
+## Queueing several parameter sets
+
+`configs/benchmark/` holds configs for the benchmark pipeline, where any parameter can be
+written as `grid: [...]` to queue one training run per combination:
+
+```bash
+anomalib benchmark --config configs/benchmark/patchcore_folder.yaml
+```
