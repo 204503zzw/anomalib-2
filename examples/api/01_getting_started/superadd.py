@@ -1,6 +1,9 @@
 # # Copyright (C) 2026 Intel Corporation
 # # SPDX-License-Identifier: Apache-2.0
 
+# 本文件保留大量中文注释与注释掉的参考代码，关闭对应检查。
+# ruff: noqa: CPY001, D100, ERA001, RUF003
+
 # """Example showing how to use the SuperADD model.
 
 # SuperADD is an unsupervised (one-class) memory-based model that extracts
@@ -64,11 +67,13 @@
 #         model=model,
 #         datamodule=datamodule,
 #     )
+from full_res_visualizer import FullResImageVisualizer
+from torchvision.transforms.v2 import ColorJitter
+
 from anomalib.data import Folder
 from anomalib.engine import Engine
 from anomalib.models import SuperADD
 from anomalib.models.image.super_add.post_processor import SuperADDPostProcessor
-from torchvision.transforms.v2 import ColorJitter
 
 # ============================================================
 # 1. 数据集
@@ -78,9 +83,9 @@ datamodule = Folder(
     root=r"/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/roi/crops16/roi",
     normal_dir="good",
     abnormal_dir="ng",
-    normal_test_dir= None,#"test/good",
+    normal_test_dir=None,  # "test/good",
     # mask_dir="ground_truth/ng",          # 有像素级标注就打开
-    train_batch_size=1,                    # 3072 必须用 1
+    train_batch_size=1,  # 3072 必须用 1
     eval_batch_size=1,
     num_workers=4,
     test_split_mode="from_dir",
@@ -94,19 +99,20 @@ datamodule = Folder(
 # 2. SuperADD（针对 3072 的推荐参数）
 # ============================================================
 model = SuperADD(
-    patch_size=640,              # 论文官方推荐值（优先使用）
-    patch_overlap=128,           # 论文官方推荐值
+    patch_size=640,  # 论文官方推荐值（优先使用）
+    patch_overlap=128,  # 论文官方推荐值
     # 备选（显存不足时按顺序降级）：
     # patch_size=512, patch_overlap=128
     # patch_size=448, patch_overlap=64
     # patch_size=320, patch_overlap=64
-
     pre_processor=SuperADD.configure_pre_processor(
-        image_size=(2688, 1856)  # 保持原图分辨率，不要下采样
+        image_size=(2688, 1856),  # 保持原图分辨率，不要下采样
     ),
     post_processor=SuperADDPostProcessor(),  # 推荐显式使用
-    gaussian_blur_sigma=3.0,     # 小目标（螺丝）建议比默认 4.0 稍低
-    score_quantile=3e-3,         # 小目标可适当放大，让图像级分数更关注局部高响应
+    gaussian_blur_sigma=3.0,  # 小目标（螺丝）建议比默认 4.0 稍低
+    score_quantile=3e-3,  # 小目标可适当放大，让图像级分数更关注局部高响应
+    # 三联图按原图分辨率保存（anomalib 默认把每格缩到 256x256，小缺陷看不清）
+    visualizer=FullResImageVisualizer(alpha=0.5),
 )
 
 # ============================================================
@@ -115,7 +121,7 @@ model = SuperADD(
 engine = Engine(
     max_epochs=1,
     accelerator="auto",
-    devices=1,                   # SuperADD 目前只支持单卡
+    devices=1,  # SuperADD 目前只支持单卡
     default_root_dir="results",
 )
 
