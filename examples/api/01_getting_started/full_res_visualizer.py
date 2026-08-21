@@ -29,6 +29,9 @@ anomalib 自带的 ``ImageVisualizer`` 用 ``item.image``（模型输入张量�
 
 调阈值：``--heat_range VMIN VMAX`` 控制热力图的色彩区间（只影响看起来红不红），
 ``--pred_threshold`` 覆盖掩膜阈值（影响轮廓圈出多少）。
+
+去噪：``--prefilter median|mean|gaussian`` 在图片送进模型之前做一次 3x3 滤波（默认 ``none``
+即不处理），用来压掉传感器噪点导致的零散高响应；三联图的底图仍是未滤波的原图。
 """
 
 from pathlib import Path
@@ -37,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from jsonargparse import ArgumentParser
 from PIL import Image, ImageFilter
+from torch.nn import functional as F  # noqa: N812
 from torch.utils.data import DataLoader
 
 from anomalib.data import ImageItem, PredictDataset
@@ -72,6 +76,42 @@ def _to_pil_mask(
     if thickness > 1:
         contour = contour.filter(ImageFilter.MaxFilter(thickness if thickness % 2 else thickness + 1))
     return contour
+
+
+class SpatialFilter3x3(torch.nn.Module):
+    """推理前的 3x3 空间滤波，作用在原始分辨率的图片张量上。
+
+    Args:
+        mode: ``median``（去椒盐噪点，保边）、``mean``（均值模糊）或 ``gaussian``
+            （高斯模糊，sigma≈0.8 的 3x3 核）。
+    """
+
+    def __init__(self, mode: str = "median") -> None:
+        super().__init__()
+        if mode not in {"median", "mean", "gaussian"}:
+            msg = f"不支持的滤波方式: {mode}"
+            raise ValueError(msg)
+        self.mode = mode
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        """对 ``(C, H, W)`` 或 ``(N, C, H, W)`` 的图片做 3x3 滤波，返回同形状张量。"""
+        batched = image.dim() == 4
+        data = image if batched else image.unsqueeze(0)
+        padded = F.pad(data.float(), (1, 1, 1, 1), mode="reflect")
+        if self.mode == "median":
+            patches = padded.unfold(2, 3, 1).unfold(3, 3, 1).reshape(*data.shape, 9)
+            out = patches.median(dim=-1).values
+        else:
+            kernel = (
+                torch.ones(3, 3) / 9.0
+                if self.mode == "mean"
+                else torch.tensor([[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]]) / 16.0
+            )
+            channels = data.shape[1]
+            weight = kernel.to(padded).expand(channels, 1, 3, 3)
+            out = F.conv2d(padded, weight, groups=channels)
+        out = out.to(image.dtype)
+        return out if batched else out.squeeze(0)
 
 
 class FullResImageVisualizer(ImageVisualizer):
@@ -269,6 +309,13 @@ def _get_parser() -> ArgumentParser:
         default=None,
         help="掩膜阈值，覆盖 ckpt 里的 pixel_threshold；轮廓太多就调大，漏检就调小",
     )
+    parser.add_argument(
+        "--prefilter",
+        type=str,
+        default="none",
+        choices=["none", "median", "mean", "gaussian"],
+        help="推理前的 3x3 滤波方式；默认 none 不处理，噪点多可用 median",
+    )
     parser.add_argument("--max_size", type=int, default=None, help="输出单格最大边长，原图过大时按比例缩小")
     return parser
 
@@ -295,7 +342,8 @@ def main() -> None:
         **model_kwargs,
     )
 
-    dataset = PredictDataset(path=args.input)
+    prefilter = SpatialFilter3x3(args.prefilter) if args.prefilter != "none" else None
+    dataset = PredictDataset(path=args.input, transform=prefilter)
     dataloader = DataLoader(dataset, batch_size=1, collate_fn=dataset.collate_fn)
     print(f">>> 共 {len(dataset)} 张图片，权重: {args.ckpt_path}")
 
