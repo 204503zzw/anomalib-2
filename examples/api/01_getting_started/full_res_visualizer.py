@@ -26,6 +26,9 @@ anomalib 自带的 ``ImageVisualizer`` 用 ``item.image``（模型输入张量�
 
 注意：``--image_size`` 和 ``--model_kwargs`` 必须与训练脚本（例如 superadd.py）完全一致，
 否则推理结果会与训练时不同。
+
+调阈值：``--heat_range VMIN VMAX`` 控制热力图的色彩区间（只影响看起来红不红），
+``--pred_threshold`` 覆盖掩膜阈值（影响轮廓圈出多少）。
 """
 
 from pathlib import Path
@@ -80,6 +83,10 @@ class FullResImageVisualizer(ImageVisualizer):
         contour_color: 预测掩膜轮廓颜色（RGB）。
         include_gt_mask: GT 掩膜存在时，是否额外输出一格「原图 + GT 轮廓」。
         text: 是否在每一格左上角写标题。
+        heat_range: 热力图的显示区间 ``(vmin, vmax)``；区间越窄红色越多。``None`` 表示
+            直接用 anomaly_map 的原始取值上色（模型输出一般已归一化到 0~1）。
+        pred_threshold: 掩膜阈值；给定时用 ``anomaly_map >= pred_threshold`` 重新算轮廓，
+            覆盖 ckpt 里的 pixel_threshold。``None`` 表示沿用模型自己的预测掩膜。
         output_dir: 输出目录，默认为 ``<trainer.default_root_dir>/images``。
         text_config: 标题文字样式，支持 ``font`` / ``size`` / ``color`` / ``background``。
     """
@@ -91,6 +98,8 @@ class FullResImageVisualizer(ImageVisualizer):
         contour_color: tuple[int, int, int] = (255, 0, 0),
         include_gt_mask: bool = True,
         text: bool = True,
+        heat_range: tuple[float, float] | None = None,
+        pred_threshold: float | None = None,
         output_dir: str | Path | None = None,
         text_config: dict[str, Any] | None = None,
     ) -> None:
@@ -101,6 +110,8 @@ class FullResImageVisualizer(ImageVisualizer):
         self.contour_color = contour_color
         self.include_gt_mask = include_gt_mask
         self.text = text
+        self.heat_range = heat_range
+        self.pred_threshold = pred_threshold
 
     def _base_image(self, item: ImageItem) -> Image.Image | None:
         """读取底图：优先用磁盘上的原图，读不到时退回模型输入张量。"""
@@ -116,6 +127,22 @@ class FullResImageVisualizer(ImageVisualizer):
             image = image.resize((round(image.width * scale), round(image.height * scale)), Image.LANCZOS)
         return image
 
+    def _scale_anomaly_map(self, anomaly_map: torch.Tensor) -> torch.Tensor:
+        """按 ``heat_range`` 把 anomaly_map 线性拉伸到 0~1，用于控制热力图的色彩范围。"""
+        scaled = anomaly_map.squeeze().float()
+        if self.heat_range is None:
+            return scaled
+        vmin, vmax = self.heat_range
+        return ((scaled - vmin) / max(vmax - vmin, 1e-12)).clamp(0.0, 1.0)
+
+    def _pred_mask(self, item: ImageItem) -> torch.Tensor | None:
+        """取预测掩膜；``pred_threshold`` 非空时按该阈值重新二值化 anomaly_map。"""
+        if self.pred_threshold is None:
+            return item.pred_mask
+        if item.anomaly_map is None:
+            return item.pred_mask
+        return item.anomaly_map.squeeze() >= self.pred_threshold
+
     def visualize_full_res(self, item: ImageItem) -> Image.Image | None:
         """生成单张原图分辨率的三联图。"""
         base = self._base_image(item)
@@ -127,7 +154,7 @@ class FullResImageVisualizer(ImageVisualizer):
         panels: list[tuple[str, Image.Image]] = [("Image", base)]
 
         if item.anomaly_map is not None:
-            heatmap = visualize_anomaly_map(item.anomaly_map.squeeze(), colormap=True, normalize=False)
+            heatmap = visualize_anomaly_map(self._scale_anomaly_map(item.anomaly_map), colormap=True, normalize=False)
             heatmap = heatmap.resize(size, Image.BICUBIC)
             panels.append(("Image + Anomaly Map", overlay_images(base, heatmap, alpha=self.alpha).convert("RGB")))
 
@@ -135,8 +162,9 @@ class FullResImageVisualizer(ImageVisualizer):
             contour = _to_pil_mask(item.gt_mask, size, thickness, (255, 255, 255))
             panels.append(("Image + GT Mask", overlay_images(base, contour).convert("RGB")))
 
-        if item.pred_mask is not None:
-            contour = _to_pil_mask(item.pred_mask, size, thickness, self.contour_color)
+        pred_mask = self._pred_mask(item)
+        if pred_mask is not None:
+            contour = _to_pil_mask(pred_mask, size, thickness, self.contour_color)
             panels.append(("Image + Pred Mask", overlay_images(base, contour).convert("RGB")))
 
         images = [image for _, image in panels]
@@ -227,6 +255,20 @@ def _get_parser() -> ArgumentParser:
         help='其余模型参数（JSON），必须与训练一致，如 \'{"patch_size": 640, "patch_overlap": 128}\'',
     )
     parser.add_argument("--alpha", type=float, default=0.5, help="热力图叠加权重（0~1）")
+    parser.add_argument(
+        "--heat_range",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("VMIN", "VMAX"),
+        help="热力图显示区间，如 --heat_range 0.3 0.8；区间越窄红色越多",
+    )
+    parser.add_argument(
+        "--pred_threshold",
+        type=float,
+        default=None,
+        help="掩膜阈值，覆盖 ckpt 里的 pixel_threshold；轮廓太多就调大，漏检就调小",
+    )
     parser.add_argument("--max_size", type=int, default=None, help="输出单格最大边长，原图过大时按比例缩小")
     return parser
 
@@ -243,7 +285,13 @@ def main() -> None:
         height, width = args.image_size
         model_kwargs["pre_processor"] = model_class.configure_pre_processor(image_size=(height, width))
     model = model_class(
-        visualizer=FullResImageVisualizer(alpha=args.alpha, max_size=args.max_size, output_dir=output_dir),
+        visualizer=FullResImageVisualizer(
+            alpha=args.alpha,
+            max_size=args.max_size,
+            heat_range=tuple(args.heat_range) if args.heat_range else None,
+            pred_threshold=args.pred_threshold,
+            output_dir=output_dir,
+        ),
         **model_kwargs,
     )
 
