@@ -30,8 +30,9 @@ anomalib 自带的 ``ImageVisualizer`` 用 ``item.image``（模型输入张量�
 调阈值：``--heat_range VMIN VMAX`` 控制热力图的色彩区间（只影响看起来红不红），
 ``--pred_threshold`` 覆盖掩膜阈值（影响轮廓圈出多少）。
 
-去噪：``--prefilter median|mean|gaussian`` 在图片送进模型之前做一次 3x3 滤波（默认 ``none``
-即不处理），用来压掉传感器噪点导致的零散高响应；三联图的底图仍是未滤波的原图。
+去噪：``--prefilter median|mean|gaussian`` 在图片送进模型之前做一次滤波（默认 ``none``
+即不处理），用来压掉传感器噪点导致的零散高响应；``--prefilter_size`` 调核边长（默认 3）。
+三联图的底图仍是未滤波的原图。
 """
 
 from pathlib import Path
@@ -78,37 +79,48 @@ def _to_pil_mask(
     return contour
 
 
-class SpatialFilter3x3(torch.nn.Module):
-    """推理前的 3x3 空间滤波，作用在原始分辨率的图片张量上。
+def _gaussian_kernel(size: int) -> torch.Tensor:
+    """按 OpenCV 的 ``sigma = 0.3 * ((size - 1) / 2 - 1) + 0.8`` 生成 ``size x size`` 高斯核。"""
+    sigma = 0.3 * ((size - 1) * 0.5 - 1) + 0.8
+    coords = torch.arange(size, dtype=torch.float32) - (size - 1) / 2
+    line = torch.exp(-(coords**2) / (2 * sigma**2))
+    kernel = torch.outer(line, line)
+    return kernel / kernel.sum()
+
+
+class SpatialFilter(torch.nn.Module):
+    """推理前的空间滤波，作用在原始分辨率的图片张量上。
 
     Args:
-        mode: ``median``（去椒盐噪点，保边）、``mean``（均值模糊）或 ``gaussian``
-            （高斯模糊，sigma≈0.8 的 3x3 核）。
+        mode: ``median``（去椒盐噪点，保边）、``mean``（均值模糊）或 ``gaussian``（高斯模糊）。
+        size: 核边长，必须是 >= 3 的奇数；越大去噪越狠，也越容易抹掉小缺陷。
     """
 
-    def __init__(self, mode: str = "median") -> None:
+    def __init__(self, mode: str = "median", size: int = 3) -> None:
         super().__init__()
         if mode not in {"median", "mean", "gaussian"}:
             msg = f"不支持的滤波方式: {mode}"
             raise ValueError(msg)
+        if size < 3 or size % 2 == 0:
+            msg = f"滤波核边长必须是 >= 3 的奇数，得到: {size}"
+            raise ValueError(msg)
         self.mode = mode
+        self.size = size
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
-        """对 ``(C, H, W)`` 或 ``(N, C, H, W)`` 的图片做 3x3 滤波，返回同形状张量。"""
+        """对 ``(C, H, W)`` 或 ``(N, C, H, W)`` 的图片做滤波，返回同形状张量。"""
         batched = image.dim() == 4
         data = image if batched else image.unsqueeze(0)
-        padded = F.pad(data.float(), (1, 1, 1, 1), mode="reflect")
+        size = self.size
+        pad = size // 2
+        padded = F.pad(data.float(), (pad, pad, pad, pad), mode="reflect")
         if self.mode == "median":
-            patches = padded.unfold(2, 3, 1).unfold(3, 3, 1).reshape(*data.shape, 9)
+            patches = padded.unfold(2, size, 1).unfold(3, size, 1).reshape(*data.shape, size * size)
             out = patches.median(dim=-1).values
         else:
-            kernel = (
-                torch.ones(3, 3) / 9.0
-                if self.mode == "mean"
-                else torch.tensor([[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]]) / 16.0
-            )
+            kernel = torch.full((size, size), 1.0 / (size * size)) if self.mode == "mean" else _gaussian_kernel(size)
             channels = data.shape[1]
-            weight = kernel.to(padded).expand(channels, 1, 3, 3)
+            weight = kernel.to(padded).expand(channels, 1, size, size)
             out = F.conv2d(padded, weight, groups=channels)
         out = out.to(image.dtype)
         return out if batched else out.squeeze(0)
@@ -314,7 +326,13 @@ def _get_parser() -> ArgumentParser:
         type=str,
         default="none",
         choices=["none", "median", "mean", "gaussian"],
-        help="推理前的 3x3 滤波方式；默认 none 不处理，噪点多可用 median",
+        help="推理前的滤波方式；默认 none 不处理，噪点多可用 median",
+    )
+    parser.add_argument(
+        "--prefilter_size",
+        type=int,
+        default=3,
+        help="滤波核边长（>=3 的奇数，如 3/5/7）；越大去噪越狠，也越容易抹掉小缺陷",
     )
     parser.add_argument("--max_size", type=int, default=None, help="输出单格最大边长，原图过大时按比例缩小")
     return parser
@@ -342,7 +360,7 @@ def main() -> None:
         **model_kwargs,
     )
 
-    prefilter = SpatialFilter3x3(args.prefilter) if args.prefilter != "none" else None
+    prefilter = SpatialFilter(args.prefilter, args.prefilter_size) if args.prefilter != "none" else None
     dataset = PredictDataset(path=args.input, transform=prefilter)
     dataloader = DataLoader(dataset, batch_size=1, collate_fn=dataset.collate_fn)
     print(f">>> 共 {len(dataset)} 张图片，权重: {args.ckpt_path}")
