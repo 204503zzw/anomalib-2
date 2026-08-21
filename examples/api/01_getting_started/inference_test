@@ -116,32 +116,91 @@ def safe_imwrite(path: str, img: np.ndarray) -> bool:
         return True
     return False
 
-def save_heatmap(anomaly_map, save_path):
-    amap = anomaly_map.squeeze().cpu().numpy()
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def tensor_to_bgr(image):
+    """把模型输入张量还原成 BGR uint8 图像。
+
+    预处理里做过 ImageNet 归一化，像素值可能是负数；直接 astype(uint8) 会得到
+    发灰/溢出的图，所以先反归一化再转换。
+    """
+    img = image.detach().cpu().numpy()
+    if img.ndim == 3 and img.shape[0] == 3:
+        img = np.transpose(img, (1, 2, 0))
+    img = img.astype(np.float32)
+    normalized = img.ndim == 3 and img.shape[2] == 3 and (img.min() < 0.0 or img.max() > 1.0)
+    if normalized:
+        img = img * IMAGENET_STD + IMAGENET_MEAN
+    if normalized or img.max() <= 1.0 + 1e-6:
+        img = img * 255.0
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return img
+
+
+def load_base_image(image_path, fallback_tensor=None):
+    """读取用于叠加的底图：优先用磁盘上的原图（原始分辨率），失败时回退到模型输入张量。"""
+    if image_path is not None:
+        img = safe_imread(str(image_path))
+        if img is not None:
+            return img
+    if fallback_tensor is None:
+        return None
+    return tensor_to_bgr(fallback_tensor)
+
+
+def anomaly_map_to_uint8(anomaly_map, size=None):
+    """归一化 anomaly_map 并按需插值到目标尺寸 (w, h)。
+
+    先在浮点上做双三次插值再量化，避免 uint8 放大产生的块状锯齿。
+    """
+    amap = anomaly_map.squeeze().detach().cpu().numpy().astype(np.float32)
     amap = (amap - amap.min()) / (amap.max() - amap.min() + 1e-8)
-    heatmap = (amap * 255).astype(np.uint8)
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    if size is not None and (amap.shape[1], amap.shape[0]) != tuple(size):
+        amap = cv2.resize(amap, tuple(size), interpolation=cv2.INTER_CUBIC)
+        amap = np.clip(amap, 0.0, 1.0)
+    return (amap * 255).astype(np.uint8)
+
+
+def save_heatmap(anomaly_map, save_path, size=None):
+    """保存纯热力图，size 为 (w, h)，给定时按原图分辨率输出。"""
+    heatmap = cv2.applyColorMap(anomaly_map_to_uint8(anomaly_map, size), cv2.COLORMAP_JET)
     safe_imwrite(str(save_path), heatmap)
 
-def save_overlay(image, anomaly_map, save_path):
-    img = image.cpu().numpy()
-    if img.shape[0] == 3:
-        img = np.transpose(img, (1, 2, 0))
-    if img.max() <= 1.0:
-        img = (img * 255).astype(np.uint8)
-    else:
-        img = img.astype(np.uint8)
-    if img.shape[2] == 3:
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-    amap = anomaly_map.squeeze().cpu().numpy()
-    amap = (amap - amap.min()) / (amap.max() - amap.min() + 1e-8)
-    amap = (amap * 255).astype(np.uint8)
-    if amap.shape[:2] != img.shape[:2]:
-        amap = cv2.resize(amap, (img.shape[1], img.shape[0]))
+def save_overlay(base_image, anomaly_map, save_path, alpha=0.5):
+    """把热力图叠加到底图上，alpha 为热力图权重（0~1）。"""
+    amap = anomaly_map_to_uint8(anomaly_map, (base_image.shape[1], base_image.shape[0]))
     heatmap = cv2.applyColorMap(amap, cv2.COLORMAP_JET)
-    overlay = cv2.addWeighted(img, 0.7, heatmap, 0.3, 0)
+    overlay = cv2.addWeighted(base_image, 1.0 - alpha, heatmap, alpha, 0)
     safe_imwrite(str(save_path), overlay)
+
+
+def save_panel(base_image, anomaly_map, pred_mask, save_path, alpha=0.5):
+    """按原图分辨率拼出「原图 | 热力图叠加 | 预测掩膜轮廓」三联图。
+
+    anomalib 自带的三联图固定按模型输入尺寸（默认 256x256）渲染，放大后很模糊；
+    这里在原图分辨率上重画，缺陷细节可见。
+    """
+    size = (base_image.shape[1], base_image.shape[0])
+    heatmap = cv2.applyColorMap(anomaly_map_to_uint8(anomaly_map, size), cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(base_image, 1.0 - alpha, heatmap, alpha, 0)
+
+    mask_panel = base_image.copy()
+    if pred_mask is not None:
+        mask = pred_mask.astype(np.uint8)
+        if (mask.shape[1], mask.shape[0]) != size:
+            mask = cv2.resize(mask, size, interpolation=cv2.INTER_NEAREST)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        thickness = max(1, round(min(size) / 400))
+        cv2.drawContours(mask_panel, contours, -1, (0, 0, 255), thickness)
+
+    safe_imwrite(str(save_path), cv2.hconcat([base_image, overlay, mask_panel]))
 
 def build_post_processor(pixel_sensitivity=None, image_sensitivity=None):
     """按需构建 OneClassPostProcessor。
@@ -665,8 +724,11 @@ def infer(args):
     output_dir = Path(args.output)
     heatmap_dir = output_dir / "heatmap"
     overlay_dir = output_dir / "overlay"
+    panel_dir = output_dir / "panel"
     heatmap_dir.mkdir(parents=True, exist_ok=True)
     overlay_dir.mkdir(parents=True, exist_ok=True)
+    if args.save_panel:
+        panel_dir.mkdir(parents=True, exist_ok=True)
 
     engine = Engine(default_root_dir=str(output_dir), devices=1)
     print(">>> 加载模型...")
@@ -769,8 +831,14 @@ def infer(args):
             if anomaly_map is not None:
                 amap = anomaly_map[i] if anomaly_map.dim() >= 3 else anomaly_map
                 img = pred.image[i] if pred.image.dim() == 4 else pred.image
-                save_heatmap(amap, heatmap_dir / f"{name}_heatmap.jpg")
-                save_overlay(img, amap, overlay_dir / f"{name}_overlay.jpg")
+                # 底图用磁盘上的原图，保证热力图画在原始分辨率上而不是 256x256 的模型输入上
+                base_image = load_base_image(img_path if args.overlay_on_original else None, img)
+                base_size = (base_image.shape[1], base_image.shape[0])
+                save_heatmap(amap, heatmap_dir / f"{name}_heatmap.jpg", base_size)
+                save_overlay(base_image, amap, overlay_dir / f"{name}_overlay.jpg", args.overlay_alpha)
+                if args.save_panel:
+                    save_panel(base_image, amap, get_batch_pred_mask(pred, i),
+                               panel_dir / f"{name}_panel.jpg", args.overlay_alpha)
 
             # 像素级评估：优先使用 anomalib 的 pred_mask，否则按回退阈值二值化 anomaly_map
             pixel_metrics = None
@@ -988,6 +1056,13 @@ def get_parser():
     parser.add_argument("--mode", type=str, default="predict", choices=["predict", "test"],
                         help="predict：单目录推理；test：用 Folder 数据集跑 engine.test，额外输出 anomalib 官方指标表")
     parser.add_argument("--show", type=bool, default=False, help="是否显示结果图像")
+    # 可视化参数
+    parser.add_argument("--overlay_on_original", type=bool, default=True,
+                        help="热力图叠加到磁盘上的原图（原始分辨率）；关闭则叠加到模型输入图上")
+    parser.add_argument("--overlay_alpha", type=float, default=0.5,
+                        help="热力图叠加权重（0~1），越大热力图越明显")
+    parser.add_argument("--save_panel", type=bool, default=True,
+                        help="另存「原图|热力图叠加|预测掩膜轮廓」三联图（原图分辨率）")
     parser.add_argument("--image_size", type=list, default=None,
                         help="训练时的输入尺寸 [height, width]，必须与训练脚本一致")
     # 像素级评估参数
