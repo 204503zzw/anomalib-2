@@ -22,7 +22,10 @@ anomalib 自带的 ``ImageVisualizer`` 用 ``item.image``（模型输入张量�
 
     python full_res_visualizer.py --ckpt_path results/.../model.ckpt \
         --input /path/to/images --output results/full_res --model SuperADD \
-        --image_size 2688 1856
+        --image_size 2688 1856 --model_kwargs '{"patch_size": 640, "patch_overlap": 128}'
+
+注意：``--image_size`` 和 ``--model_kwargs`` 必须与训练脚本（例如 superadd.py）完全一致，
+否则推理结果会与训练时不同。
 """
 
 from pathlib import Path
@@ -35,7 +38,7 @@ from torch.utils.data import DataLoader
 
 from anomalib.data import ImageItem, PredictDataset
 from anomalib.engine import Engine
-from anomalib.models import get_model
+from anomalib.models import _get_model_class_by_name
 from anomalib.utils.path import generate_output_filename
 from anomalib.visualization.image import ImageVisualizer
 from anomalib.visualization.image.functional import (
@@ -211,9 +214,17 @@ def _get_parser() -> ArgumentParser:
     parser.add_argument("--model", type=str, default="SuperADD", help="anomalib 模型类名，如 SuperADD / Patchcore")
     parser.add_argument(
         "--image_size",
-        type=list[int],
+        type=int,
+        nargs=2,
         default=None,
-        help="训练时的输入尺寸 [height, width]，必须与训练脚本一致",
+        metavar=("HEIGHT", "WIDTH"),
+        help="训练时的输入尺寸，写法 --image_size 2688 1856，必须与训练脚本一致",
+    )
+    parser.add_argument(
+        "--model_kwargs",
+        type=dict,
+        default={},
+        help='其余模型参数（JSON），必须与训练一致，如 \'{"patch_size": 640, "patch_overlap": 128}\'',
     )
     parser.add_argument("--alpha", type=float, default=0.5, help="热力图叠加权重（0~1）")
     parser.add_argument("--max_size", type=int, default=None, help="输出单格最大边长，原图过大时按比例缩小")
@@ -226,13 +237,15 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = get_model(
-        args.model,
-        visualizer=FullResImageVisualizer(alpha=args.alpha, max_size=args.max_size, output_dir=output_dir),
-    )
+    model_class = _get_model_class_by_name(args.model)
+    model_kwargs: dict[str, Any] = dict(args.model_kwargs)
     if args.image_size:
         height, width = args.image_size
-        model.pre_processor = type(model).configure_pre_processor(image_size=(height, width))
+        model_kwargs["pre_processor"] = model_class.configure_pre_processor(image_size=(height, width))
+    model = model_class(
+        visualizer=FullResImageVisualizer(alpha=args.alpha, max_size=args.max_size, output_dir=output_dir),
+        **model_kwargs,
+    )
 
     dataset = PredictDataset(path=args.input)
     dataloader = DataLoader(dataset, batch_size=1, collate_fn=dataset.collate_fn)
