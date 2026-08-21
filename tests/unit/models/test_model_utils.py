@@ -6,8 +6,11 @@
 import pytest
 from jsonargparse import Namespace
 from omegaconf import OmegaConf
+from torchvision.transforms.v2 import Compose
 
 from anomalib.models import EfficientAd, GeneralAD, Padim, Patchcore, UnknownModelError, get_model
+from anomalib.post_processing import PostProcessor
+from anomalib.pre_processing import PreProcessor
 
 SMALL_GENERAL_AD_ARGS = {
     "backbone": "vit_tiny_patch16_224",
@@ -97,6 +100,60 @@ class TestGetModel:
         config = OmegaConf.create({"class_path": "Padim", "init_args": {"backbone": "wide_resnet50_2"}})
         model = get_model(config)
         assert isinstance(model, Padim)
+
+    @staticmethod
+    def test_get_model_with_nested_init_args() -> None:
+        """Test get_model instantiates nested ``class_path`` entries of init args."""
+        model = get_model({
+            "class_path": "Patchcore",
+            "init_args": {
+                "backbone": "resnet18",
+                "pre_processor": {
+                    "class_path": "anomalib.pre_processing.PreProcessor",
+                    "init_args": {
+                        "transform": {
+                            "class_path": "torchvision.transforms.v2.Compose",
+                            "init_args": {
+                                "transforms": [
+                                    {
+                                        "class_path": "torchvision.transforms.v2.Resize",
+                                        "init_args": {"size": [256, 320]},
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        })
+        assert isinstance(model, Patchcore)
+        assert isinstance(model.pre_processor, PreProcessor)
+        assert isinstance(model.pre_processor.transform, Compose)
+        assert model.pre_processor.transform.transforms[0].size == [256, 320]
+
+    @staticmethod
+    def test_get_model_with_nested_init_args_from_dict_config() -> None:
+        """Test nested instantiation also works for ``DictConfig`` inputs."""
+        config = OmegaConf.create({
+            "class_path": "Patchcore",
+            "init_args": {
+                "post_processor": {
+                    "class_path": "anomalib.post_processing.PostProcessor",
+                    "init_args": {"enable_normalization": False},
+                },
+            },
+        })
+        model = get_model(config)
+        assert isinstance(model.post_processor, PostProcessor)
+
+    @staticmethod
+    def test_get_model_with_disallowed_nested_class_path() -> None:
+        """Test get_model rejects nested class paths outside the whitelist."""
+        with pytest.raises(UnknownModelError):
+            get_model({
+                "class_path": "Patchcore",
+                "init_args": {"pre_processor": {"class_path": "os.system", "init_args": {}}},
+            })
 
     @staticmethod
     def test_get_unknown_model() -> None:
