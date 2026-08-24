@@ -1001,3 +1001,101 @@ def infer(args):
                 f.write(f"IoU: {global_iou:.4f}\n")
                 f.write(f"掩膜来源: {pixel_mask_source}\n")
                 f.write(f"回退阈值: {pixel_threshold:.4f}\n")
+                f.write(f"TP={total_tp} FP={total_fp} FN={total_fn} TN={total_tn}\n")
+                f.write(f"区域级覆盖率阈值: {args.coverage_threshold:.2f}\n")
+                f.write(f"区域级 缺陷总数={total_gt_regions} 检出={total_detected} "
+                        f"漏检={total_missed} 误报={total_region_fp}\n")
+                f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
+                for line in format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples):
+                    f.write(line + "\n")
+
+            f.write("\n" + "=" * 60 + "\n")
+            f.write("【图像级评估】\n")
+            f.write(f"漏检率: {img_metrics['miss_rate']:.4f}\n")
+            f.write(f"误检率: {img_metrics['false_alarm']:.4f}\n")
+            f.write(f"准确率: {img_metrics['accuracy']:.4f}\n")
+            f.write(f"精确率: {img_metrics['precision']:.4f}\n")
+            f.write(f"召回率: {img_metrics['recall']:.4f}\n")
+            f.write(f"F1-Score: {img_metrics['f1']:.4f}\n")
+            f.write(f"阈值: {image_threshold:.4f}\n")
+            f.write(f"TP={img_metrics['tp']} FP={img_metrics['fp']} TN={img_metrics['tn']} FN={img_metrics['fn']}\n")
+            f.write("=" * 60 + "\n")
+
+            if region_detail_blocks:
+                f.write("\n" + "=" * 60 + "\n")
+                f.write("【区域级逐图明细】\n")
+                for block in region_detail_blocks:
+                    f.write(f"\n{block['image']}  {block['summary']}\n")
+                    for line in block['lines']:
+                        f.write(f"  {line}\n")
+                f.write("=" * 60 + "\n")
+
+        print(f"\n汇总报告已保存: {summary_path}")
+
+    # 保存区域级明细CSV
+    if region_rows:
+        region_csv_path = output_dir / "region_detail.csv"
+        pd.DataFrame(region_rows).to_csv(region_csv_path, index=False, encoding="utf-8-sig")
+        print(f"区域级明细已保存: {region_csv_path}")
+
+    # 保存CSV
+    csv_path = output_dir / "result.csv"
+    df = pd.DataFrame(results)
+    if 'pixel_miss_rate' in df.columns:
+        df['pixel_miss_rate'] = df['pixel_miss_rate'].apply(lambda x: f"{x:.2%}" if isinstance(x, float) else x)
+        df['pixel_false_alarm'] = df['pixel_false_alarm'].apply(lambda x: f"{x:.2%}" if isinstance(x, float) else x)
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    print(f"\n推理完成，结果保存到: {output_dir}")
+
+# ---------- 命令行解析 ----------
+def get_parser():
+    parser = ArgumentParser()
+    parser.add_argument("--config", action=ActionConfigFile, help="配置文件路径")
+    parser.add_argument("--output", type=str, default="./inference_results")
+    parser.add_argument("--ckpt_path", type=str, required=True, help="模型权重路径 .ckpt")
+    parser.add_argument("--model", type=dict, required=True, help="模型配置")
+    parser.add_argument("--data", type=dict, required=True,
+                        help="数据配置：predict 模式为 PredictDataset 参数，test 模式为 Folder 参数")
+    parser.add_argument("--mode", type=str, default="predict", choices=["predict", "test"],
+                        help="predict：单目录推理；test：用 Folder 数据集跑 engine.test，额外输出 anomalib 官方指标表")
+    parser.add_argument("--show", type=bool, default=False, help="是否显示结果图像")
+    # 可视化参数
+    parser.add_argument("--overlay_on_original", type=bool, default=True,
+                        help="热力图叠加到磁盘上的原图（原始分辨率）；关闭则叠加到模型输入图上")
+    parser.add_argument("--overlay_alpha", type=float, default=0.5,
+                        help="热力图叠加权重（0~1），越大热力图越明显")
+    parser.add_argument("--save_panel", type=bool, default=True,
+                        help="另存「原图|热力图叠加|预测掩膜轮廓」三联图（原图分辨率）")
+    parser.add_argument("--image_size", type=list, default=None,
+                        help="训练时的输入尺寸 [height, width]，必须与训练脚本一致")
+    # 像素级评估参数
+    parser.add_argument("--gt_dir", type=str, default=None, help="GT掩码目录（与测试图片同名）")
+    parser.add_argument("--threshold", type=float, default=0.5,
+                        help="像素级回退二值化阈值：仅在 pred_mask 不可用时用于 anomaly_map（默认0.5）")
+    parser.add_argument("--scan_threshold", type=bool, default=False,
+                        help="是否自动扫描 anomaly_map 回退路径的最佳阈值（像素级）")
+    parser.add_argument("--no_gt_as_normal", type=bool, default=False,
+                        help="predict 模式下 gt_dir 中找不到 GT 的图视为正常图，并计入像素级和图像级指标")
+    # 图像级评估参数
+    parser.add_argument("--image_threshold", type=float, default=0.5, help="图像级异常分数阈值（默认0.5）")
+    parser.add_argument("--scan_image_threshold", type=bool, default=False, help="是否自动扫描最佳阈值（图像级）")
+    # anomalib 内部后处理阈值（影响可视化四联图里的 pred_mask 红圈），阈值 = 1 - sensitivity
+    parser.add_argument("--pixel_sensitivity", type=float, default=None,
+                        help="anomalib 像素级灵敏度，阈值=1-该值，默认0.5；调大则红圈变大")
+    parser.add_argument("--image_sensitivity", type=float, default=None,
+                        help="anomalib 图像级灵敏度，阈值=1-该值，默认0.5")
+    # 区域级评估参数
+    parser.add_argument("--coverage_threshold", type=float, default=0.3,
+                        help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检")
+    parser.add_argument("--min_region_area", type=int, default=0,
+                        help="忽略面积小于该值的连通域（像素数），用于过滤噪点")
+    parser.add_argument("--area_bins", type=Union[str, list[int]], default=DEFAULT_AREA_BINS,
+                        help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率，如 [4,8,16,32] 或 4,8,16,32")
+    parser.add_argument("--area_bin_examples", type=int, default=0,
+                        help="每个面积区间列出多少张漏检图片名：0=全部列出，N>0=最多 N 条，负数=不列")
+    return parser
+
+if __name__ == "__main__":
+    parser = get_parser()
+    args = parser.parse_args()
+    infer(args)
