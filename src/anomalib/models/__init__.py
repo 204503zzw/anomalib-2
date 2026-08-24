@@ -58,7 +58,7 @@ import logging
 from importlib import import_module
 
 from jsonargparse import Namespace
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from anomalib.models import _legacy_compat  # noqa: F401  # registers legacy checkpoint import aliases
 from anomalib.models.components import AnomalibModule
@@ -104,6 +104,18 @@ ALLOWED_MODULES = {
     "anomalib.models.image",
     "anomalib.models.video",
     "anomalib.models.components",
+}
+
+# Whitelist of allowed modules for nested objects passed through ``init_args``,
+# such as pre-processors, post-processors, evaluators, visualizers and transforms.
+ALLOWED_INIT_ARG_MODULES = {
+    "anomalib.metrics",
+    "anomalib.post_processing",
+    "anomalib.pre_processing",
+    "anomalib.visualization",
+    "torch.nn",
+    "torchvision.transforms",
+    "torchvision.transforms.v2",
 }
 
 
@@ -212,6 +224,53 @@ def list_models(case: str = "snake") -> set[str]:
         return {convert_to_title_case(name) for name in models}
 
     return models
+
+
+def _instantiate_init_arg(value: object) -> object:
+    """Recursively instantiate ``class_path``/``init_args`` entries of a config value.
+
+    Configs coming from yaml files (for example benchmark pipeline configs) describe
+    nested objects such as pre-processors or transforms as dictionaries with a
+    ``class_path`` key. This helper turns them into objects, leaving plain values
+    untouched.
+
+    Args:
+        value (object): Config value to convert.
+
+    Raises:
+        UnknownModelError: If the module of ``class_path`` is not whitelisted.
+
+    Returns:
+        object: Instantiated object, or the original value if it is not a class config.
+
+    Examples:
+        >>> transform = _instantiate_init_arg({
+        ...     "class_path": "torchvision.transforms.v2.Resize",
+        ...     "init_args": {"size": [256, 320]},
+        ... })
+        >>> transform.size
+        [256, 320]
+    """
+    if isinstance(value, DictConfig | Namespace):
+        value = OmegaConf.to_object(OmegaConf.create(value)) if isinstance(value, DictConfig) else value.as_dict()
+    if isinstance(value, list | ListConfig):
+        return [_instantiate_init_arg(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if "class_path" not in value:
+        return {key: _instantiate_init_arg(item) for key, item in value.items()}
+
+    class_path = str(value["class_path"])
+    module_path, _, class_name = class_path.rpartition(".")
+    if module_path not in ALLOWED_INIT_ARG_MODULES:
+        msg = f"Module import from '{module_path}' is not allowed. Only imports from {ALLOWED_INIT_ARG_MODULES} are permitted."  # noqa: E501
+        logger.error(msg)
+        raise UnknownModelError(msg)
+
+    # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
+    module = import_module(module_path)
+    init_args = {key: _instantiate_init_arg(item) for key, item in value.get("init_args", {}).items()}
+    return getattr(module, class_name)(**init_args)
 
 
 def _get_model_class_by_name(name: str) -> type[AnomalibModule]:
@@ -339,6 +398,7 @@ def get_model(model: DictConfig | str | dict | Namespace, *args, **kwdargs) -> A
             init_args = model.get("init_args", {})
             if len(kwdargs) > 0:
                 init_args.update(kwdargs)
+            init_args = {key: _instantiate_init_arg(value) for key, value in init_args.items()}
             model_ = model_class(*args, **init_args)
         except AttributeError as exception:
             logger.exception(
