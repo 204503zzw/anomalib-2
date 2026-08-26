@@ -1,4 +1,4 @@
-# Copyright (C) 2022-2025 Intel Corporation
+# Copyright (C) 2022-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """PyTorch model for the PatchCore model implementation.
@@ -45,6 +45,14 @@ from anomalib.models.components import DynamicBufferMixin, KCenterGreedy, TimmFe
 from anomalib.utils import deprecate
 
 from .anomaly_map import AnomalyMapGenerator
+from .foreground import (
+    BACKGROUND_SUPPRESSION_BLEND,
+    BACKGROUND_VALUE,
+    compute_background_prototype,
+    compute_soft_foreground_mask,
+    enhance_semantic,
+    enhance_spatial,
+)
 
 if TYPE_CHECKING:
     from anomalib.data.utils.tiler import Tiler
@@ -84,6 +92,19 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
             smooth heatmaps but flatten the peaks of small defects, so a small value
             such as ``1`` helps when the defects are only a few pixels wide.
             Defaults to ``4``.
+        foreground_mask (bool, optional): Weight patch anomaly scores by a
+            training-free soft foreground mask (values ``{0.5, 1.0}``) so that
+            background regions contribute less to detection. Inspired by FB-CLIP
+            (Hu et al., CVPR 2026). Defaults to ``False``.
+        enhancement_views (Sequence[str], optional): Training-free multi-view
+            embedding enhancement applied identically when building the memory
+            bank and at inference. Any subset of ``"sem"`` (semantic view:
+            foreground/background-aware global attention) and ``"spa"`` (spatial
+            view: 5x5 neighborhood aggregation). The identity view is always
+            retained and the enabled views are averaged with it. Defaults to ``()``.
+        background_suppression (bool, optional): Build a background prototype
+            from the training images and down-weight patch scores of tokens
+            similar to it at inference. Defaults to ``False``.
 
     Example:
         >>> from anomalib.models.image.patchcore.torch_model import PatchcoreModel
@@ -125,6 +146,9 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
         num_neighbors: int = 9,
         feature_pool_size: int = 3,
         blur_sigma: int = 4,
+        foreground_mask: bool = False,
+        enhancement_views: Sequence[str] = (),
+        background_suppression: bool = False,
     ) -> None:
         super().__init__()
         if feature_pool_size < 1 or feature_pool_size % 2 == 0:
@@ -132,6 +156,10 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
             raise ValueError(msg)
         if blur_sigma < 1:
             msg = f"blur_sigma must be a positive integer, got {blur_sigma}."
+            raise ValueError(msg)
+        invalid_views = set(enhancement_views) - {"sem", "spa"}
+        if invalid_views:
+            msg = f"enhancement_views must be a subset of {{'sem', 'spa'}}, got {sorted(invalid_views)}."
             raise ValueError(msg)
         self.tiler: Tiler | None = None
 
@@ -150,9 +178,48 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
         )
         self.blur_sigma = blur_sigma
         self.anomaly_map_generator = AnomalyMapGenerator(sigma=blur_sigma)
+        self.foreground_mask = foreground_mask
+        self.enhancement_views = tuple(enhancement_views)
+        self.background_suppression = background_suppression
         self.memory_bank: torch.Tensor
         self.register_buffer("memory_bank", torch.empty(0))
+        self.background_prototype: torch.Tensor
+        if background_suppression:
+            self.register_buffer("background_prototype", torch.empty(0))
+        else:
+            self.background_prototype = torch.empty(0)
         self.embedding_store: list[torch.tensor] = []
+        self.background_store: list[torch.Tensor] = []
+
+    @property
+    def uses_foreground_disentanglement(self) -> bool:
+        """Whether any FB-CLIP-inspired foreground-background option is enabled."""
+        return self.foreground_mask or bool(self.enhancement_views) or self.background_suppression
+
+    def apply_enhancement_views(
+        self,
+        tokens: torch.Tensor,
+        mask: torch.Tensor,
+        grid_size: tuple[int, int],
+    ) -> torch.Tensor:
+        """Average the identity view with the enabled enhancement views.
+
+        Args:
+            tokens (torch.Tensor): Patch embeddings of shape ``(B, L, C)``.
+            mask (torch.Tensor): Soft foreground mask of shape ``(B, L)``.
+            grid_size (tuple[int, int]): Spatial layout ``(height, width)`` of the tokens.
+
+        Returns:
+            torch.Tensor: Fused embeddings of shape ``(B, L, C)``.
+        """
+        views = [tokens]
+        if "sem" in self.enhancement_views:
+            views.append(enhance_semantic(tokens, mask))
+        if "spa" in self.enhancement_views:
+            views.append(enhance_spatial(tokens, mask, grid_size))
+        if len(views) == 1:
+            return tokens
+        return torch.stack(views).mean(dim=0)
 
     def forward(self, input_tensor: torch.Tensor) -> torch.Tensor | InferenceBatch:
         """Process input tensor through the model.
@@ -194,10 +261,20 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
             embedding = self.tiler.untile(embedding)
 
         batch_size, _, width, height = embedding.shape
-        embedding = self.reshape_embedding(embedding)
+        soft_mask: torch.Tensor | None = None
+        if self.uses_foreground_disentanglement:
+            tokens = embedding.permute(0, 2, 3, 1).reshape(batch_size, width * height, -1)
+            soft_mask = compute_soft_foreground_mask(tokens, (width, height))
+            tokens = self.apply_enhancement_views(tokens, soft_mask, (width, height))
+            embedding = tokens.reshape(-1, tokens.shape[-1])
+        else:
+            embedding = self.reshape_embedding(embedding)
 
         if self.training:
             self.embedding_store.append(embedding)
+            if self.background_suppression and soft_mask is not None:
+                tokens = embedding.reshape(batch_size, -1, embedding.shape[-1])
+                self.background_store.append(tokens[soft_mask == BACKGROUND_VALUE])
             return embedding
 
         # Ensure memory bank is not empty
@@ -210,6 +287,17 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
         # reshape to batch dimension
         patch_scores = patch_scores.reshape((batch_size, -1))
         locations = locations.reshape((batch_size, -1))
+        if self.background_suppression and self.background_prototype.numel() > 0:
+            background_similarity = F.cosine_similarity(
+                embedding,
+                self.background_prototype.unsqueeze(0),
+                dim=-1,
+            ).clamp(0, 1)
+            patch_scores = patch_scores * (
+                1 - BACKGROUND_SUPPRESSION_BLEND * background_similarity.reshape(batch_size, -1)
+            )
+        if self.foreground_mask and soft_mask is not None:
+            patch_scores = patch_scores * soft_mask
         # compute anomaly score
         pred_score = self.compute_anomaly_score(patch_scores, locations, embedding)
         # reshape to w, h
@@ -306,6 +394,12 @@ class PatchcoreModel(DynamicBufferMixin, nn.Module):
 
         sampler = KCenterGreedy(embedding=self.memory_bank, sampling_ratio=sampling_ratio)
         self.memory_bank = sampler.sample_coreset()
+
+        if self.background_suppression and self.background_store:
+            background_bank = torch.vstack(self.background_store)
+            self.background_store.clear()
+            if background_bank.size(0) > 0:
+                self.background_prototype = compute_background_prototype(background_bank)
 
     @staticmethod
     def euclidean_dist(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:

@@ -4,7 +4,8 @@
 """Unit tests for the PatchCore model.
 
 Covers the configurable feature pooling that controls how much local context is
-averaged into each patch embedding, and the configurable anomaly map blur.
+averaged into each patch embedding, the configurable anomaly map blur, and the
+optional FB-CLIP-inspired foreground-background disentanglement.
 """
 
 import pytest
@@ -12,6 +13,14 @@ import torch
 from torch import nn
 
 from anomalib.models import Patchcore
+from anomalib.models.image.patchcore.foreground import (
+    BACKGROUND_VALUE,
+    FOREGROUND_VALUE,
+    compute_background_prototype,
+    compute_soft_foreground_mask,
+    enhance_semantic,
+    enhance_spatial,
+)
 from anomalib.models.image.patchcore.torch_model import PatchcoreModel
 
 
@@ -105,3 +114,139 @@ def test_lightning_model_forwards_blur_sigma() -> None:
     model = Patchcore(backbone="resnet18", layers=["layer1"], pre_trained=False, blur_sigma=1)
     assert model.model.blur_sigma == 1
     assert model.model.anomaly_map_generator.blur.kernel.shape[-2:] == (9, 9)
+
+
+def _tokens(batch_size: int = 2, height: int = 8, width: int = 8, channels: int = 16) -> torch.Tensor:
+    generator = torch.Generator().manual_seed(0)
+    return torch.rand(batch_size, height * width, channels, generator=generator)
+
+
+def test_soft_foreground_mask_values_and_shape() -> None:
+    """The soft mask is binary over {0.5, 1.0} and matches the token layout."""
+    tokens = _tokens()
+    mask = compute_soft_foreground_mask(tokens, (8, 8))
+    assert mask.shape == (2, 64)
+    assert set(mask.unique().tolist()) <= {BACKGROUND_VALUE, FOREGROUND_VALUE}
+
+
+def test_enhancement_views_preserve_shape() -> None:
+    """SEM and SPA views keep the token tensor shape unchanged."""
+    tokens = _tokens()
+    mask = compute_soft_foreground_mask(tokens, (8, 8))
+    assert enhance_semantic(tokens, mask).shape == tokens.shape
+    assert enhance_spatial(tokens, mask, (8, 8)).shape == tokens.shape
+
+
+def test_enhancement_views_handle_uniform_mask() -> None:
+    """All-background and all-foreground masks produce finite outputs."""
+    tokens = _tokens()
+    for value in (BACKGROUND_VALUE, FOREGROUND_VALUE):
+        mask = torch.full(tokens.shape[:2], value)
+        assert torch.isfinite(enhance_semantic(tokens, mask)).all()
+        assert torch.isfinite(enhance_spatial(tokens, mask, (8, 8))).all()
+
+
+def test_background_prototype_shape() -> None:
+    """The prototype is a single vector combining mean and max pooling."""
+    background = torch.rand(10, 16)
+    prototype = compute_background_prototype(background)
+    assert prototype.shape == (16,)
+    expected = 0.5 * background.mean(dim=0) + 0.5 * background.amax(dim=0)
+    assert torch.allclose(prototype, expected)
+
+
+def test_default_options_disable_disentanglement() -> None:
+    """All FB-CLIP-inspired options are off by default."""
+    model = _model()
+    assert model.foreground_mask is False
+    assert model.enhancement_views == ()
+    assert model.background_suppression is False
+    assert not model.uses_foreground_disentanglement
+    assert "background_prototype" not in dict(model.named_buffers())
+
+
+def test_invalid_enhancement_views() -> None:
+    """Unknown view names are rejected."""
+    with pytest.raises(ValueError, match="enhancement_views"):
+        _model(enhancement_views=["id"])
+
+
+def test_apply_enhancement_views_identity_only() -> None:
+    """Without enabled views the tokens pass through unchanged."""
+    model = _model()
+    tokens = _tokens()
+    mask = compute_soft_foreground_mask(tokens, (8, 8))
+    assert model.apply_enhancement_views(tokens, mask, (8, 8)) is tokens
+
+
+def test_apply_enhancement_views_averages_with_identity() -> None:
+    """Enabled views are averaged together with the identity view."""
+    model = _model(enhancement_views=["sem", "spa"])
+    tokens = _tokens()
+    mask = compute_soft_foreground_mask(tokens, (8, 8))
+    fused = model.apply_enhancement_views(tokens, mask, (8, 8))
+    expected = (tokens + enhance_semantic(tokens, mask) + enhance_spatial(tokens, mask, (8, 8))) / 3
+    assert torch.allclose(fused, expected)
+
+
+def test_forward_with_options_matches_default_shapes() -> None:
+    """Enabled options keep the inference output shapes of the default model."""
+    torch.manual_seed(0)
+    images = torch.rand(2, 3, 64, 64)
+    outputs = {}
+    for name, kwargs in {
+        "default": {},
+        "fb": {"foreground_mask": True, "enhancement_views": ["sem", "spa"], "background_suppression": True},
+    }.items():
+        model = _model(**kwargs)
+        model.train()
+        model(images)
+        model.subsample_embedding(sampling_ratio=0.5)
+        model.eval()
+        outputs[name] = model(images)
+    assert outputs["fb"].pred_score.shape == outputs["default"].pred_score.shape
+    assert outputs["fb"].anomaly_map.shape == outputs["default"].anomaly_map.shape
+    assert torch.isfinite(outputs["fb"].anomaly_map).all()
+
+
+def test_background_prototype_built_during_fit() -> None:
+    """Fitting with background suppression populates the prototype buffer."""
+    torch.manual_seed(0)
+    model = _model(background_suppression=True)
+    model.train()
+    model(torch.rand(2, 3, 64, 64))
+    model.subsample_embedding(sampling_ratio=0.5)
+    assert model.background_prototype.numel() > 0
+    assert "background_prototype" in dict(model.named_buffers())
+
+
+def test_foreground_mask_downweights_background_scores() -> None:
+    """Background patches are scaled by the soft mask at inference."""
+    torch.manual_seed(0)
+    images = torch.rand(2, 3, 64, 64)
+    masked = _model(foreground_mask=True)
+    masked.train()
+    masked(images)
+    masked.subsample_embedding(sampling_ratio=0.5)
+    masked.eval()
+    plain = _model()
+    plain.memory_bank = masked.memory_bank
+    plain.eval()
+    masked_map = masked(images).anomaly_map
+    plain_map = plain(images).anomaly_map
+    assert masked_map.amax() <= plain_map.amax() + 1e-5
+
+
+def test_lightning_model_forwards_fb_options() -> None:
+    """The Lightning module passes the FB-CLIP-inspired options to the torch model."""
+    model = Patchcore(
+        backbone="resnet18",
+        layers=["layer1"],
+        pre_trained=False,
+        foreground_mask=True,
+        enhancement_views=["sem"],
+        background_suppression=True,
+    )
+    assert model.model.foreground_mask is True
+    assert model.model.enhancement_views == ("sem",)
+    assert model.model.background_suppression is True

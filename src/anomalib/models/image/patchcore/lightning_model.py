@@ -1,4 +1,4 @@
-# Copyright (C) 2022-2025 Intel Corporation
+# Copyright (C) 2022-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """PatchCore: Towards Total Recall in Industrial Anomaly Detection.
@@ -101,6 +101,17 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
             the anomaly map. Must be a positive integer. Smaller values keep the peaks
             of small defects sharp, larger values give smoother heatmaps.
             Defaults to ``4``.
+        foreground_mask (bool, optional): Weight patch anomaly scores by a
+            training-free soft foreground mask so that background regions
+            contribute less to detection. Inspired by FB-CLIP (Hu et al.,
+            CVPR 2026). Defaults to ``False``.
+        enhancement_views (Sequence[str], optional): Training-free multi-view
+            embedding enhancement. Any subset of ``"sem"`` (semantic view) and
+            ``"spa"`` (spatial view); the identity view is always retained.
+            Defaults to ``()``.
+        background_suppression (bool, optional): Build a background prototype
+            from the training images and down-weight patch scores of tokens
+            similar to it at inference. Defaults to ``False``.
         precision (str | PrecisionType, optional): Precision type for model computations.
             Can be either a string (``"float32"``, ``"float16"``) or a :class:`PrecisionType` enum value.
             Defaults to ``PrecisionType.FLOAT32``.
@@ -155,6 +166,9 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
         num_neighbors: int = 9,
         feature_pool_size: int = 3,
         blur_sigma: int = 4,
+        foreground_mask: bool = False,
+        enhancement_views: Sequence[str] = (),
+        background_suppression: bool = False,
         precision: str | PrecisionType = PrecisionType.FLOAT32,
         pre_processor: nn.Module | bool = True,
         post_processor: nn.Module | bool = True,
@@ -175,6 +189,9 @@ class Patchcore(MemoryBankMixin, AnomalibModule):
             num_neighbors=num_neighbors,
             feature_pool_size=feature_pool_size,
             blur_sigma=blur_sigma,
+            foreground_mask=foreground_mask,
+            enhancement_views=enhancement_views,
+            background_suppression=background_suppression,
         )
         self.coreset_sampling_ratio = coreset_sampling_ratio
 
