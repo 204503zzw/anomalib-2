@@ -202,13 +202,23 @@ def save_panel(base_image, anomaly_map, pred_mask, save_path, alpha=0.5):
 
     safe_imwrite(str(save_path), cv2.hconcat([base_image, overlay, mask_panel]))
 
-def build_post_processor(pixel_sensitivity=None, image_sensitivity=None):
+def build_post_processor(
+    pixel_sensitivity=None,
+    image_sensitivity=None,
+    pixel_threshold_method=None,
+    region_num_thresholds=50,
+    region_overlap_ratio=0.5,
+):
     """按需构建 OneClassPostProcessor。
 
     sensitivity 作用在归一化后的 [0, 1] 尺度上，阈值 = 1 - sensitivity。
     影响 anomalib 自己产出的 pred_mask / pred_label（即四联图里的红圈）。
+
+    pixel_threshold_method 决定像素阈值由哪条 precision-recall 曲线选出：
+    "pixel_f1" 为逐像素 F1（anomalib 默认），"region_f1" 为区域级（连通域）F1。
+    该阈值只在验证阶段计算，所以设置了它必须再跑一次 engine.validate 才会生效。
     """
-    if pixel_sensitivity is None and image_sensitivity is None:
+    if pixel_sensitivity is None and image_sensitivity is None and pixel_threshold_method is None:
         return None
     # 新版 anomalib 叫 PostProcessor，旧版叫 OneClassPostProcessor，参数相同
     try:
@@ -220,7 +230,12 @@ def build_post_processor(pixel_sensitivity=None, image_sensitivity=None):
         kwargs["pixel_sensitivity"] = pixel_sensitivity
     if image_sensitivity is not None:
         kwargs["image_sensitivity"] = image_sensitivity
-    print(f">>> 使用 post_processor sensitivity: {kwargs}")
+    if pixel_threshold_method is not None:
+        kwargs["pixel_threshold_method"] = pixel_threshold_method
+        if pixel_threshold_method == "region_f1":
+            kwargs["region_num_thresholds"] = region_num_thresholds
+            kwargs["region_overlap_ratio"] = region_overlap_ratio
+    print(f">>> 使用 post_processor 参数: {kwargs}")
     return _PP(**kwargs)
 
 def build_model_from_config(model_cfg: dict, image_size=None, post_processor=None):
@@ -735,7 +750,13 @@ def infer(args):
     model = build_model_from_config(
         args.model,
         args.image_size,
-        build_post_processor(args.pixel_sensitivity, args.image_sensitivity),
+        build_post_processor(
+            args.pixel_sensitivity,
+            args.image_sensitivity,
+            args.pixel_threshold_method,
+            args.region_num_thresholds,
+            args.region_overlap_ratio,
+        ),
     )
 
     print(">>> 加载数据集...")
@@ -753,15 +774,36 @@ def infer(args):
         datamodule.setup("test")
         print(f">>> 测试集共 {len(datamodule.test_data)} 张图片")
         print(f">>> 使用权重: {args.ckpt_path}")
-        engine.test(model=model, datamodule=datamodule, ckpt_path=args.ckpt_path)
         dataloader = datamodule.test_dataloader()
+        val_datamodule = datamodule
     else:
+        datamodule = None
         dataset = PredictDataset(**data_cfg)
         dataloader = DataLoader(dataset, batch_size=1, collate_fn=dataset.collate_fn)
         print(f">>> 开始推理，共 {len(dataset)} 张图片")
         print(f">>> 使用权重: {args.ckpt_path}")
+        val_datamodule = Folder(**dict(args.val_data)) if args.val_data else None
 
-    predictions = engine.predict(model=model, dataloaders=[dataloader], ckpt_path=args.ckpt_path)
+    # 重算 anomalib 内部像素阈值：ckpt 里存的是训练时用 pixel_threshold_method 算出的值，
+    # 换阈值策略必须再跑一次验证循环（验证集需要带 gt_mask）。
+    ckpt_for_inference = args.ckpt_path
+    if args.pixel_threshold_method is not None:
+        if val_datamodule is None:
+            msg = (
+                "设置了 --pixel_threshold_method 却没有可用于重算阈值的验证集："
+                "请使用 --mode test，或用 --val_data 传入 Folder 数据集参数（需包含 mask_dir）。"
+            )
+            raise SystemExit(msg)
+        print(f">>> 用 {args.pixel_threshold_method} 在验证集上重算像素阈值...")
+        engine.validate(model=model, datamodule=val_datamodule, ckpt_path=args.ckpt_path)
+        print(f">>> 重算后的像素阈值: {model.post_processor.pixel_threshold.item():.4f}")
+        # 后续步骤不能再传 ckpt_path，否则新阈值会被 ckpt 里的旧值覆盖
+        ckpt_for_inference = None
+
+    if args.mode == "test":
+        engine.test(model=model, datamodule=datamodule, ckpt_path=ckpt_for_inference)
+
+    predictions = engine.predict(model=model, dataloaders=[dataloader], ckpt_path=ckpt_for_inference)
     if predictions is None or len(predictions) == 0:
         print("!!! 未获得任何预测结果")
         return
@@ -1081,6 +1123,17 @@ def get_parser():
                         help="anomalib 像素级灵敏度，阈值=1-该值，默认0.5；调大则红圈变大")
     parser.add_argument("--image_sensitivity", type=float, default=None,
                         help="anomalib 图像级灵敏度，阈值=1-该值，默认0.5")
+    # anomalib 内部像素阈值的选取策略：设置后会先跑一次验证循环重算阈值，不设则沿用 ckpt 里的阈值
+    parser.add_argument("--pixel_threshold_method", type=str, default=None,
+                        choices=["pixel_f1", "region_f1"],
+                        help="像素阈值策略：pixel_f1=逐像素F1（anomalib 默认），region_f1=区域级(连通域)F1；"
+                             "设置后需要带 gt_mask 的验证集来重算阈值")
+    parser.add_argument("--region_num_thresholds", type=int, default=50,
+                        help="region_f1 的候选阈值个数，越大越细但越慢（默认50）")
+    parser.add_argument("--region_overlap_ratio", type=float, default=0.5,
+                        help="region_f1 的连通域命中所需最小覆盖比例，取值 [0,1)（默认0.5）")
+    parser.add_argument("--val_data", type=dict, default=None,
+                        help="predict 模式下用于重算阈值的 Folder 数据集参数（需包含 mask_dir）")
     # 区域级评估参数
     parser.add_argument("--coverage_threshold", type=float, default=0.3,
                         help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检")
