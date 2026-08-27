@@ -665,9 +665,10 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5, no_gt_as_n
         no_gt_as_normal: gt_files 中缺少 GT 时是否按正常图计入统计
 
     Returns:
-        dict: 包含TP, FP, TN, FN及各项指标
+        dict: 包含TP, FP, TN, FN、各项指标，以及误检(fp_images)/漏检(fn_images)的图片名
     """
     img_tp = img_fp = img_tn = img_fn = 0
+    fp_images, fn_images = [], []
 
     for idx, pred in enumerate(predictions):
         image_paths = pred.image_path if isinstance(pred.image_path, list) else [pred.image_path]
@@ -691,10 +692,12 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5, no_gt_as_n
                     img_tp += 1
                 elif pred_label == 1 and gt_label == 0:
                     img_fp += 1
+                    fp_images.append((Path(img_path).name, score))
                 elif pred_label == 0 and gt_label == 0:
                     img_tn += 1
                 elif pred_label == 0 and gt_label == 1:
                     img_fn += 1
+                    fn_images.append((Path(img_path).name, score))
 
     # 计算指标
     eps = 1e-8
@@ -719,7 +722,22 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5, no_gt_as_n
         "recall": recall,
         "f1": f1,
         "accuracy": accuracy,
+        "fp_images": sorted(fp_images, key=lambda t: (-t[1], t[0])),
+        "fn_images": sorted(fn_images, key=lambda t: (t[1], t[0])),
     }
+
+
+def format_image_error_lists(img_metrics):
+    """把图像级误检/漏检的图片名列成文本行，格式为 图片名(异常分数)。"""
+    lines = []
+    for title, key in (("误检图片(好图判为NG)", "fp_images"), ("漏检图片(缺陷图判为OK)", "fn_images")):
+        items = img_metrics.get(key, [])
+        if not items:
+            lines.append(f"{title}: 无")
+            continue
+        text = ", ".join(f"{name}({score:.4f})" for name, score in items)
+        lines.append(f"{title}（共 {len(items)} 张，格式为 图片名(异常分数)）: {text}")
+    return lines
 
 
 def collect_eval_pairs(predictions, gt_dir=None):
@@ -1132,6 +1150,8 @@ def infer(args):
             f.write(f"F1-Score: {img_metrics['f1']:.4f}\n")
             f.write(f"阈值: {image_threshold:.4f}\n")
             f.write(f"TP={img_metrics['tp']} FP={img_metrics['fp']} TN={img_metrics['tn']} FN={img_metrics['fn']}\n")
+            for line in format_image_error_lists(img_metrics):
+                f.write(line + "\n")
             f.write("=" * 60 + "\n")
 
             if region_detail_blocks:
