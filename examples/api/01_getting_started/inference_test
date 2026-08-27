@@ -512,6 +512,32 @@ def summarize_area_bins(records, edges):
     return rows
 
 
+def format_fp_image_summary(records, max_examples=0):
+    """把有误报的图片按误报类型列成清单。
+
+    records 每项为 ``{'image', 'fp_overlap', 'fp_isolated'}``，只列出有误报的图片。
+    max_examples 控制每类最多列多少张：0 表示全部列出，正数表示最多 N 条，负数表示不列。
+    """
+    if max_examples < 0:
+        return []
+    groups = [
+        ('与GT区域有交集的误报图片', 'fp_overlap'),
+        ('与GT区域无交集的误报图片', 'fp_isolated'),
+    ]
+    lines = []
+    for title, key in groups:
+        items = sorted(((r['image'], r[key]) for r in records if r[key] > 0), key=lambda t: (-t[1], t[0]))
+        if not items:
+            lines.append(f"{title}: 无")
+            continue
+        shown = items if max_examples == 0 else items[:max_examples]
+        text = ", ".join(f"{name}({count})" for name, count in shown)
+        if len(items) > len(shown):
+            text += f" ... 共 {len(items)} 张"
+        lines.append(f"{title}（共 {len(items)} 张，格式为 图片名(误报区域数)）: {text}")
+    return lines
+
+
 def summarize_missed_areas(records):
     """漏检缺陷与检出缺陷的面积分布对比。"""
     missed = np.array([r['area'] for r in records if r['status'] == 'missed'], dtype=float)
@@ -876,6 +902,7 @@ def infer(args):
     total_gt_regions = total_detected = total_missed = total_region_fp = 0
     total_region_fp_overlap = total_region_fp_isolated = 0
     images_with_fp = images_with_fp_isolated = 0
+    fp_image_records = []
 
     for idx, pred in enumerate(predictions):
         image_paths = pred.image_path if isinstance(pred.image_path, list) else [pred.image_path]
@@ -966,6 +993,12 @@ def infer(args):
                 total_region_fp_isolated += region_metrics['region_fp_isolated']
                 images_with_fp += int(region_metrics['region_fp'] > 0)
                 images_with_fp_isolated += int(region_metrics['region_fp_isolated'] > 0)
+                if region_metrics['region_fp'] > 0:
+                    fp_image_records.append({
+                        'image': Path(img_path).name,
+                        'fp_overlap': region_metrics['region_fp_overlap'],
+                        'fp_isolated': region_metrics['region_fp_isolated'],
+                    })
                 print(f"   [区域级] 缺陷{region_metrics['region_gt']}个 检出{region_metrics['region_detected']}个 "
                       f"漏检{region_metrics['region_missed']}个 误报{region_metrics['region_fp']}个"
                       f"(与GT有交集{region_metrics['region_fp_overlap']}个/无交集"
@@ -1038,6 +1071,8 @@ def infer(args):
         print(f"  与GT区域有交集:       {total_region_fp_overlap}")
         print(f"  与GT区域无交集:       {total_region_fp_isolated}")
         print(f"含误报的图片数:       {images_with_fp}（其中含无交集误报 {images_with_fp_isolated} 张）")
+        for line in format_fp_image_summary(fp_image_records, args.fp_image_examples):
+            print(line)
         area_summary_lines = format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples)
         if area_summary_lines:
             print("-"*60)
@@ -1082,6 +1117,8 @@ def infer(args):
                 f.write(f"区域级误报拆分: 与GT有交集={total_region_fp_overlap} "
                         f"与GT无交集={total_region_fp_isolated}\n")
                 f.write(f"含误报图片数={images_with_fp} 含无交集误报图片数={images_with_fp_isolated}\n")
+                for line in format_fp_image_summary(fp_image_records, args.fp_image_examples):
+                    f.write(line + "\n")
                 f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
                 for line in format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples):
                     f.write(line + "\n")
@@ -1181,6 +1218,8 @@ def get_parser():
                         help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率，如 [4,8,16,32] 或 4,8,16,32")
     parser.add_argument("--area_bin_examples", type=int, default=0,
                         help="每个面积区间列出多少张漏检图片名：0=全部列出，N>0=最多 N 条，负数=不列")
+    parser.add_argument("--fp_image_examples", type=int, default=0,
+                        help="每类误报列出多少张图片名：0=全部列出，N>0=最多 N 条，负数=不列")
     return parser
 
 if __name__ == "__main__":
