@@ -9,7 +9,9 @@ binary predictions.
 Available Thresholds:
     - ``Threshold``: Generic threshold class that can be initialized with a value
     - ``F1AdaptiveThreshold``: Automatically finds optimal threshold by maximizing
-      F1 score
+      pixel-level F1 score
+    - ``RegionF1AdaptiveThreshold``: Automatically finds optimal threshold by
+      maximizing region-level (connected-component) F1 score
     - ``ManualThreshold``: Allows manual setting of threshold value
 
 Example:
@@ -23,5 +25,6 @@ Example:
 from .base import Threshold
 from .f1_adaptive_threshold import F1AdaptiveThreshold
 from .manual_threshold import ManualThreshold
+from .region_f1_adaptive_threshold import RegionF1AdaptiveThreshold
 
-__all__ = ["Threshold", "F1AdaptiveThreshold", "ManualThreshold"]
+__all__ = ["Threshold", "F1AdaptiveThreshold", "ManualThreshold", "RegionF1AdaptiveThreshold"]

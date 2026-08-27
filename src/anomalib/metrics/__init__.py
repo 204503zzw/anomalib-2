@@ -1,4 +1,4 @@
-# Copyright (C) 2022-2025 Intel Corporation
+# Copyright (C) 2022-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Custom metrics for evaluating anomaly detection models.
@@ -16,7 +16,8 @@ This module provides various metrics for evaluating anomaly detection performanc
     - ``F1Max``: Maximum F1 score across thresholds
 
 - Threshold metrics:
-    - ``F1AdaptiveThreshold``: Finds optimal threshold by maximizing F1 score
+    - ``F1AdaptiveThreshold``: Finds optimal threshold by maximizing pixel-level F1 score
+    - ``RegionF1AdaptiveThreshold``: Finds optimal threshold by maximizing region-level F1 score
     - ``ManualThreshold``: Uses manually specified threshold
 
 - Other metrics:
@@ -62,7 +63,7 @@ from .pg_pb import PBn, PGn
 from .pimo import AUPIMO, PIMO
 from .precision_recall_curve import BinaryPrecisionRecallCurve
 from .pro import PRO
-from .threshold import F1AdaptiveThreshold, ManualThreshold
+from .threshold import F1AdaptiveThreshold, ManualThreshold, RegionF1AdaptiveThreshold
 
 __all__ = [
     "AUROC",
@@ -83,4 +84,5 @@ __all__ = [
     "PRO",
     "PIMO",
     "AUPIMO",
+    "RegionF1AdaptiveThreshold",
 ]
