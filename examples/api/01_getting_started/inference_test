@@ -18,10 +18,13 @@ builtins.open = utf8_open
 
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONIOENCODING"] = "utf-8"
+# cuBLAS 确定性要求在 CUDA 初始化前设置，因此放在 import torch 之前
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import importlib
 import importlib.abc
 import importlib.util
+import random
 from types import ModuleType
 from typing import Union
 
@@ -780,7 +783,25 @@ def scan_best_threshold(predictions, gt_dir=None, num_steps=200, level='pixel', 
     return best_th
 
 # ---------- 主推理函数 ----------
+def enable_determinism(seed=0):
+    """固定随机性并关闭 cuDNN 算法自动选择，让同一权重多次推理结果完全一致。
+
+    默认情况下 cuDNN/cuBLAS 会按运行时表现挑选算法，前向结果会有 1e-6 级差异；
+    pred_mask 用固定阈值卡归一化后的热力图，缺陷边界像素会因此翻转，导致像素级
+    TP/FP 在两次运行之间轻微变化。
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+
 def infer(args):
+    if args.deterministic:
+        enable_determinism(args.seed)
     install_legacy_metric_compat()
     output_dir = Path(args.output)
     heatmap_dir = output_dir / "heatmap"
@@ -1173,6 +1194,9 @@ def get_parser():
     parser.add_argument("--mode", type=str, default="predict", choices=["predict", "test"],
                         help="predict：单目录推理；test：用 Folder 数据集跑 engine.test，额外输出 anomalib 官方指标表")
     parser.add_argument("--show", type=bool, default=False, help="是否显示结果图像")
+    parser.add_argument("--deterministic", type=bool, default=True,
+                        help="固定随机性并关闭 cuDNN 算法自动选择，保证同一权重多次运行的指标完全一致")
+    parser.add_argument("--seed", type=int, default=0, help="确定性推理使用的随机种子")
     # 可视化参数
     parser.add_argument("--overlay_on_original", type=bool, default=True,
                         help="热力图叠加到磁盘上的原图（原始分辨率）；关闭则叠加到模型输入图上")
