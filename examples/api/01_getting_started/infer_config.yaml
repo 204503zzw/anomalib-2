@@ -1,34 +1,47 @@
 # ============================================================
 # PatchCore inference config
 # anomalib 2.5.x
+#python inference_test.py --config infer_config.yaml --scan_threshold True --area_bins 64,80,95,110,130,145
 # ============================================================
 mode: test
 no_gt_as_normal: true
  
 # 训练时的输入尺寸 [height, width]，必须与训练脚本一致
 image_size: [512, 512]
-threshold: 0.35          # 像素级，等价于 pixel_sensitivity=0.7
-image_threshold: 0.5    # 图像级，等价于 image_sensitivity=0.5
-pixel_sensitivity: 0.65
-image_sensitivity: 0.5
+# threshold: 0.35          # 像素级，等价于 pixel_sensitivity=0.7
+# image_threshold: 0.5    # 图像级，等价于 image_sensitivity=0.5
+# pixel_sensitivity: 0.65
+# image_sensitivity: 0.5
+
+
+pixel_threshold_method: region_f1   # 不写=沿用 ckpt 里训练时算出的阈值
+region_num_thresholds: 50           # 候选阈值个数，越大越细越慢
+region_overlap_ratio: 0.7           # 连通域命中所需最小覆盖比例，[0,1)
 
 model:
   class_path: anomalib.models.Patchcore
   init_args:
     backbone: vit_small_patch16_dinov3
     layers:
-      - blocks.3
+      #- blocks.3
       - blocks.5
       - blocks.8
+      # - stages.0
+      # - stages.1
+    #feature_pool_size: 1   # 关掉 3x3 特征平均池化
+    #blur_sigma: 1          # 热力图高斯核 33px -> 9px
+    coreset_sampling_ratio: 0.1
+    num_neighbors: 9
+
 # model:
 #   class_path: anomalib.models.Patchcore
 #   init_args:
-#     backbone: resnet50
+#     backbone: wide_resnet50_2
 #     layers:
 #       - layer1
 #       - layer2
-    coreset_sampling_ratio: 0.1
-    num_neighbors: 9
+#     coreset_sampling_ratio: 0.1
+#     num_neighbors: 9
  
 data:                      # test 模式下这里是 Folder 的参数
   name: my_dataset
@@ -38,10 +51,65 @@ data:                      # test 模式下这里是 Folder 的参数
   normal_test_dir: test/good
   mask_dir: ground_truth/ng
   num_workers: 0
+# data:                      # test 模式下这里是 Folder 的参数
+#   name: my_dataset
+#   root: /hy-tmp/unsupervised/data3/data_no
+#   normal_dir: train/good
+#   abnormal_dir: /hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/test_1.03/ng
+#   normal_test_dir: /hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/test_1.03/good
+#   mask_dir: ground_truth/ng
+#   num_workers: 0
+  
+ckpt_path: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/results/Patchcore/my_dataset/latest_vit58/weights/lightning/model.ckpt"
  
-ckpt_path: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/results/Patchcore/my_dataset/latest_vit_358/weights/lightning/model.ckpt"
- 
-output: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/output"
+output: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/output_super"
  
 show: true
+
+# # ============================================================
+# # PatchCore inference config
+# # anomalib 2.5.x
+# # ============================================================
+# mode: test
+# no_gt_as_normal: true
+ 
+# # 训练时的输入尺寸 [height, width]，必须与训练脚本一致
+# image_size: [512, 512]
+# # threshold: 0.4          # 像素级，等价于 pixel_sensitivity=0.7
+# # image_threshold: 0.5    # 图像级，等价于 image_sensitivity=0.5
+# # pixel_sensitivity: 0.6
+# # image_sensitivity: 0.5
+
+# # model:
+# #   class_path: anomalib.models.Patchcore
+# #   init_args:
+# #     backbone: vit_small_patch16_dinov3
+# #     layers:
+# #       #- blocks.3
+# #       - blocks.5
+# #       - blocks.8
+# model:
+#   class_path: anomalib.models.Patchcore
+#   init_args:
+#     backbone: vit_small_patch16_dinov3
+#     layers:
+#       - blocks.5
+#       - blocks.8
+#     coreset_sampling_ratio: 0.1
+#     num_neighbors: 9
+ 
+# data:                      # test 模式下这里是 Folder 的参数
+#   name: my_dataset
+#   root: /hy-tmp/unsupervised/data3/data_no
+#   normal_dir: train/good
+#   abnormal_dir: test/ng
+#   normal_test_dir: test/good
+#   mask_dir: ground_truth/ng
+#   num_workers: 0
+ 
+# ckpt_path: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/results/Patchcore/my_dataset/latest_vit58_f1/weights/lightning/model.ckpt"
+ 
+# output: "/hy-tmp/unsupervised/anomalib-main-2/examples/api/01_getting_started/output_resnet"
+ 
+# show: true
  
