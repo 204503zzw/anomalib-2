@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Post-processing module for anomaly detection results.
@@ -18,13 +18,18 @@ Example:
     >>> predictions = post_processor(anomaly_maps=anomaly_maps)
 """
 
+from typing import TYPE_CHECKING, Literal
+
 import torch
 from lightning import LightningModule, Trainer
 from lightning.pytorch import Callback
 from torch import nn
 
 from anomalib.data import Batch, InferenceBatch
-from anomalib.metrics import F1AdaptiveThreshold, MinMax
+from anomalib.metrics import F1AdaptiveThreshold, MinMax, RegionF1AdaptiveThreshold
+
+if TYPE_CHECKING:
+    from anomalib.metrics.threshold import Threshold
 
 
 class PostProcessor(nn.Module, Callback):
@@ -50,12 +55,28 @@ class PostProcessor(nn.Module, Callback):
         pixel_sensitivity (float | None, optional): Sensitivity value for pixel-level
             predictions. Higher values make the model more sensitive to anomalies.
             Defaults to None.
+        pixel_threshold_method (str, optional): Criterion used to select the pixel-level
+            threshold during validation. ``"pixel_f1"`` maximizes the pixel-level F1 score,
+            while ``"region_f1"`` maximizes the region-level (connected-component) F1 score,
+            which weights every anomalous region equally regardless of its size.
+            Defaults to ``"pixel_f1"``.
+        region_num_thresholds (int, optional): Number of candidate thresholds in the
+            region-level sweep. Only used when ``pixel_threshold_method="region_f1"``.
+            Defaults to 50.
+        region_overlap_ratio (float, optional): Minimum fraction of a region's pixels that
+            must overlap with the other mask for the region to count as matched. Only used
+            when ``pixel_threshold_method="region_f1"``. Defaults to 0.5.
         **kwargs: Additional keyword arguments passed to parent class.
+
+    Raises:
+        ValueError: If ``pixel_threshold_method`` is not one of ``"pixel_f1"`` or ``"region_f1"``.
 
     Example:
         >>> from anomalib.post_processing import PostProcessor
         >>> post_processor = PostProcessor(image_sensitivity=0.5)
         >>> predictions = post_processor(anomaly_maps=anomaly_maps)
+        >>> # select the pixel threshold with a region-level F1 curve
+        >>> post_processor = PostProcessor(pixel_threshold_method="region_f1")
     """
 
     def __init__(
@@ -65,6 +86,9 @@ class PostProcessor(nn.Module, Callback):
         enable_threshold_matching: bool = True,
         image_sensitivity: float = 0.5,
         pixel_sensitivity: float = 0.5,
+        pixel_threshold_method: Literal["pixel_f1", "region_f1"] = "pixel_f1",
+        region_num_thresholds: int = 50,
+        region_overlap_ratio: float = 0.5,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -72,6 +96,7 @@ class PostProcessor(nn.Module, Callback):
         self.enable_thresholding = enable_thresholding
         self.enable_normalization = enable_normalization
         self.enable_threshold_matching = enable_threshold_matching
+        self.pixel_threshold_method = pixel_threshold_method
 
         # configure sensitivity values
         self.image_sensitivity = image_sensitivity
@@ -79,7 +104,24 @@ class PostProcessor(nn.Module, Callback):
 
         # initialize threshold and normalization metrics
         self._image_threshold_metric = F1AdaptiveThreshold(fields=["pred_score", "gt_label"], strict=False)
-        self._pixel_threshold_metric = F1AdaptiveThreshold(fields=["anomaly_map", "gt_mask"], strict=False)
+        if pixel_threshold_method == "pixel_f1":
+            self._pixel_threshold_metric: Threshold = F1AdaptiveThreshold(
+                fields=["anomaly_map", "gt_mask"],
+                strict=False,
+            )
+        elif pixel_threshold_method == "region_f1":
+            self._pixel_threshold_metric = RegionF1AdaptiveThreshold(
+                fields=["anomaly_map", "gt_mask"],
+                strict=False,
+                num_thresholds=region_num_thresholds,
+                overlap_ratio=region_overlap_ratio,
+            )
+        else:
+            msg = (
+                f"Invalid pixel threshold method: {pixel_threshold_method}. "
+                "Valid options are 'pixel_f1' and 'region_f1'."
+            )
+            raise ValueError(msg)
         self._image_min_max_metric = MinMax(fields=["pred_score"], strict=False)
         self._pixel_min_max_metric = MinMax(fields=["anomaly_map"], strict=False)
 

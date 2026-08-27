@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Test the PostProcessor class."""
@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from anomalib.data import ImageBatch
+from anomalib.metrics.threshold import F1AdaptiveThreshold, RegionF1AdaptiveThreshold
 from anomalib.post_processing import PostProcessor
 
 
@@ -78,6 +79,41 @@ class TestPostProcessor:
         pre_processor.on_validation_epoch_end(None, None)
         assert pre_processor.image_threshold == 60
         assert pre_processor.pixel_threshold == 80
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        ("method", "metric_type"),
+        [("pixel_f1", F1AdaptiveThreshold), ("region_f1", RegionF1AdaptiveThreshold)],
+    )
+    def test_pixel_threshold_method(method: str, metric_type: type) -> None:
+        """Test that the pixel threshold metric matches the requested method."""
+        post_processor = PostProcessor(pixel_threshold_method=method)
+        assert isinstance(post_processor._pixel_threshold_metric, metric_type)  # noqa: SLF001
+
+    @staticmethod
+    def test_invalid_pixel_threshold_method() -> None:
+        """Test that an unknown pixel threshold method is rejected."""
+        with pytest.raises(ValueError, match="Invalid pixel threshold method"):
+            PostProcessor(pixel_threshold_method="region_iou")
+
+    @staticmethod
+    def test_region_threshold_computed() -> None:
+        """Test that the region-level pixel threshold is computed during validation."""
+        anomaly_map = torch.full((2, 16, 16), 0.1)
+        gt_mask = torch.zeros(2, 16, 16)
+        anomaly_map[0, 2:6, 2:6] = 0.9
+        gt_mask[0, 2:6, 2:6] = 1
+        batch = ImageBatch(
+            image=torch.rand(2, 3, 16, 16),
+            anomaly_map=anomaly_map,
+            gt_mask=gt_mask,
+            pred_score=torch.tensor([0.9, 0.1]),
+            gt_label=torch.tensor([1, 0]),
+        )
+        post_processor = PostProcessor(pixel_threshold_method="region_f1", region_num_thresholds=10)
+        post_processor.on_validation_batch_end(None, None, batch)
+        post_processor.on_validation_epoch_end(None, None)
+        assert 0.1 < post_processor.pixel_threshold.item() < 0.9
 
     @staticmethod
     def test_pixel_threshold_matching() -> None:

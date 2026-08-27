@@ -69,7 +69,14 @@ Maximum F1 score across all possible thresholds. Useful for finding optimal oper
 :link: anomalib.metrics.F1AdaptiveThreshold
 :link-type: doc
 
-Automatically determines the optimal threshold by maximizing F1 score.
+Automatically determines the optimal threshold by maximizing the pixel-level F1 score.
+:::
+
+:::{grid-item-card} RegionF1AdaptiveThreshold
+:link: anomalib.metrics.RegionF1AdaptiveThreshold
+:link-type: doc
+
+Automatically determines the optimal threshold by maximizing the region-level (connected-component) F1 score.
 :::
 
 :::{grid-item-card} ManualThreshold
@@ -162,7 +169,7 @@ Computes precision-recall curves for binary classification tasks.
 
 ```{eval-rst}
 .. automodule:: anomalib.metrics
-   :members: AUROC, AUPR, AUPRO, AUPIMO, F1Score, F1Max, F1AdaptiveThreshold, ManualThreshold, PRO, PIMO, PGn, PBn, MinMax, AnomalyScoreDistribution, AnomalibMetric, Evaluator, BinaryPrecisionRecallCurve, create_anomalib_metric
+   :members: AUROC, AUPR, AUPRO, AUPIMO, F1Score, F1Max, F1AdaptiveThreshold, RegionF1AdaptiveThreshold, ManualThreshold, PRO, PIMO, PGn, PBn, MinMax, AnomalyScoreDistribution, AnomalibMetric, Evaluator, BinaryPrecisionRecallCurve, create_anomalib_metric
    :undoc-members:
    :show-inheritance:
 ```

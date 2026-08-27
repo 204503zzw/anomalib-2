@@ -103,6 +103,19 @@ post_processor = PostProcessor(
 model = Padim(post_processor=post_processor)
 ```
 
+By default the pixel-level threshold is the value that maximizes the pixel-level F1 score on the validation set. Since pixel-level F1 is dominated by large anomalies, the threshold can also be selected with a region-level (connected-component) F1 curve, in which every anomalous region counts once regardless of its size:
+
+```python
+post_processor = PostProcessor(
+    pixel_threshold_method="region_f1",  # default: "pixel_f1"
+    region_num_thresholds=50,  # granularity of the threshold sweep
+    region_overlap_ratio=0.5,  # required overlap between a region and its match
+)
+model = Padim(post_processor=post_processor)
+```
+
+A ground truth region counts as detected when more than `region_overlap_ratio` of its pixels are predicted as anomalous, and a predicted region counts as correct when more than `region_overlap_ratio` of its pixels fall inside a ground truth region. Region-level thresholding is slower than the pixel-level default, because it requires a connected-component labeling per candidate threshold.
+
 When a post-processor instance is not passed explicitly to the model, the model will automatically configure a default post-processor instance. Let's confirm this by creating a Padim model and printing the `post_processor` attribute:
 
 ```python
