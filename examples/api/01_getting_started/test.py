@@ -574,7 +574,9 @@ def format_area_split_summary(
 ):
     """把「预测区域 / GT 缺陷」按 GT 缺陷面积（split 像素为界）分桶的统计格式化成文本行。
 
-    命中的预测区域按它交集最大的那个 GT 缺陷的面积分桶，因此与 GT 行可以直接对应；
+    命中的预测区域按它交集最大的那个 GT 缺陷的面积分桶；「命中GT数」列取该面积桶里
+    覆盖率 >= coverage_threshold 的 GT 缺陷数（与 GT 行的检出数一致），「预测区域数」
+    则是预测连通域个数（一个 GT 可能被多个预测区域同时命中）；
     所有误报区域（不论与 GT 有无交集）单独列在 ``误报(全部)`` 行，并拆成
     与 GT 有交集 / 无交集两类；GT 侧两个面积桶另给出漏检（与预测有交集 / 无交集）的拆分。
     max_examples 控制每个桶里列出多少条区域（漏检、误报各自计数）：0 表示全部列出，
@@ -585,16 +587,20 @@ def format_area_split_summary(
     lines = [
         f"【面积分桶统计】分界={split} 像素；检出判定：GT 覆盖率 >= {coverage_threshold:.0%}，"
         f"有交集判定：交集比例 >= {overlap_ratio_threshold:.0%}",
-        f"{'预测区域(按命中GT面积)':>16} {'区域数':>8} {'命中':>8} {'误报(有交集)':>14} {'误报(无交集)':>14}",
+        f"{'预测区域(按命中GT面积)':>16} {'命中GT数':>9} {'预测区域数':>10} {'误报(有交集)':>14} {'误报(无交集)':>14}",
     ]
     pred_rows = summarize_pred_area_split(pred_records, split)
+    gt_rows = summarize_gt_area_split(gt_records, split)
+    # 命中 GT 数直接取该面积桶里覆盖率达到阈值的 GT 数，与 GT 表的检出数一致
+    hit_gt_by_range = {r["range"]: r["detected"] for r in gt_rows}
     for row in pred_rows:
+        # 误报行没有对应的命中 GT，置为 "-"
+        hit_gt_text = "-" if row["range"] == FALSE_ALARM_BUCKET else str(hit_gt_by_range.get(row["range"], 0))
         lines.append(
-            f"{row['range']:>16} {row['total']:>8} {row['matched']:>8} "
+            f"{row['range']:>16} {hit_gt_text:>9} {row['total']:>10} "
             f"{row['fp_overlap']:>14} {row['fp_isolated']:>14}"
         )
     lines.append(f"{'GT缺陷面积':>16} {'缺陷数':>8} {'检出':>8} {'漏检':>8} {'漏检率':>10}")
-    gt_rows = summarize_gt_area_split(gt_records, split)
     for row in gt_rows:
         lines.append(
             f"{row['range']:>16} {row['total']:>8} {row['detected']:>8} {row['missed']:>8} {row['miss_rate']:>9.2%}"
