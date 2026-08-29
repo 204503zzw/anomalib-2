@@ -28,7 +28,6 @@ import importlib
 import importlib.abc
 import importlib.util
 from types import ModuleType
-from typing import Union
 
 import cv2
 import numpy as np
@@ -465,9 +464,6 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.6, min_area=
     }
 
 
-DEFAULT_AREA_BINS = [16, 64, 256, 1024, 4096]
-
-
 def collect_gt_area_records(image_path, region_metrics):
     """收集每个 GT 缺陷的面积与检出状态，供面积分箱统计使用。"""
     image_name = Path(image_path).name
@@ -624,57 +620,6 @@ def format_area_split_summary(
     return lines
 
 
-def parse_area_bins(edges):
-    """把分箱边界归一化成升序正整数列表。
-
-    兼容 CLI 传入的字符串元素、``"4,8,16"`` / ``"[4, 8, 16]"`` 这样的整串写法，
-    以及中文全角逗号。
-    """
-    if edges is None:
-        return []
-    if isinstance(edges, str):
-        edges = edges.replace("，", ",").strip().strip("[]").split(",")
-    values = set()
-    for e in edges:
-        text = str(e).strip().strip("[]")
-        if not text:
-            continue
-        value = int(float(text))
-        if value > 0:
-            values.add(value)
-    return sorted(values)
-
-
-def summarize_area_bins(records, edges):
-    """按缺陷面积分箱统计检出/漏检数量。
-
-    edges 为升序的面积分界值（像素数），生成 (0, e1]、(e1, e2] ... (en, inf) 各区间。
-    """
-    edges = parse_area_bins(edges)
-    bounds = [(0, edges[0])] if edges else []
-    bounds += [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
-    bounds.append((edges[-1] if edges else 0, float("inf")))
-
-    rows = []
-    for low, high in bounds:
-        in_bin = [r for r in records if low < r["area"] <= high]
-        missed = sum(1 for r in in_bin if r["status"] == "missed")
-        total = len(in_bin)
-        label = f"({low}, {high}]" if high != float("inf") else f"> {low}"
-        missed_items = sorted(
-            ((r["image"], r["area"]) for r in in_bin if r["status"] == "missed"), key=lambda t: (t[0], t[1])
-        )
-        rows.append({
-            "range": label,
-            "total": total,
-            "detected": total - missed,
-            "missed": missed,
-            "miss_rate": missed / (total + 1e-8),
-            "missed_items": missed_items,
-        })
-    return rows
-
-
 def format_fp_image_summary(records, max_examples=0):
     """把有误报的图片按误报类型列成清单。
 
@@ -698,69 +643,6 @@ def format_fp_image_summary(records, max_examples=0):
         if len(items) > len(shown):
             text += f" ... 共 {len(items)} 张"
         lines.append(f"{title}（共 {len(items)} 张，格式为 图片名(误报区域数)）: {text}")
-    return lines
-
-
-def summarize_missed_areas(records):
-    """漏检缺陷与检出缺陷的面积分布对比。"""
-    missed = np.array([r["area"] for r in records if r["status"] == "missed"], dtype=float)
-    detected = np.array([r["area"] for r in records if r["status"] == "detected"], dtype=float)
-
-    def stats(areas):
-        if areas.size == 0:
-            return None
-        return {
-            "count": int(areas.size),
-            "min": float(areas.min()),
-            "p25": float(np.percentile(areas, 25)),
-            "median": float(np.median(areas)),
-            "mean": float(areas.mean()),
-            "p75": float(np.percentile(areas, 75)),
-            "max": float(areas.max()),
-        }
-
-    return {"missed": stats(missed), "detected": stats(detected)}
-
-
-def format_area_summary(records, edges, max_examples=0):
-    """把面积分箱统计与漏检面积分布格式化成文本行。
-
-    max_examples 控制每个面积区间列出多少张漏检图片名：0 表示全部列出，
-    正数表示最多列 N 条，负数表示不列。
-    """
-    if not records:
-        return []
-    lines = [
-        "【漏检缺陷面积统计】面积单位为像素，基于原图分辨率下的 GT 连通域",
-        f"{'面积区间':>16} {'缺陷数':>8} {'检出':>8} {'漏检':>8} {'漏检率':>10}",
-    ]
-    rows = summarize_area_bins(records, edges)
-    for row in rows:
-        lines.append(
-            f"{row['range']:>16} {row['total']:>8} {row['detected']:>8} {row['missed']:>8} {row['miss_rate']:>9.2%}"
-        )
-
-    if max_examples >= 0 and any(row["missed"] for row in rows):
-        lines.append("【各面积区间的漏检图片】格式为 图片名(缺陷面积)")
-        for row in rows:
-            if not row["missed"]:
-                continue
-            shown = row["missed_items"] if max_examples == 0 else row["missed_items"][:max_examples]
-            text = ", ".join(f"{name}({area})" for name, area in shown)
-            if len(row["missed_items"]) > len(shown):
-                text += f" ... 共 {len(row['missed_items'])} 个"
-            lines.append(f"  {row['range']}: {text}")
-
-    dist = summarize_missed_areas(records)
-    for key, title in (("missed", "漏检缺陷面积"), ("detected", "检出缺陷面积")):
-        s = dist[key]
-        if s is None:
-            lines.append(f"{title}: 无")
-            continue
-        lines.append(
-            f"{title}: n={s['count']} min={s['min']:.0f} p25={s['p25']:.0f} "
-            f"中位数={s['median']:.0f} 均值={s['mean']:.1f} p75={s['p75']:.0f} max={s['max']:.0f}"
-        )
     return lines
 
 
@@ -1298,11 +1180,6 @@ def infer(args):
             print("-" * 60)
             for line in area_split_lines:
                 print(line)
-        area_summary_lines = format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples)
-        if area_summary_lines:
-            print("-" * 60)
-            for line in area_summary_lines:
-                print(line)
         print("=" * 60)
 
     # ========== 图像级全局汇总 ==========
@@ -1357,8 +1234,6 @@ def infer(args):
                     args.overlap_ratio_threshold,
                     args.area_split_examples,
                 ):
-                    f.write(line + "\n")
-                for line in format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples):
                     f.write(line + "\n")
 
             f.write("\n" + "=" * 60 + "\n")
@@ -1483,18 +1358,6 @@ def get_parser():
     )
     parser.add_argument(
         "--min_region_area", type=int, default=0, help="忽略面积小于该值的连通域（像素数），用于过滤噪点"
-    )
-    parser.add_argument(
-        "--area_bins",
-        type=Union[str, list[int]],
-        default=DEFAULT_AREA_BINS,
-        help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率，如 [4,8,16,32] 或 4,8,16,32",
-    )
-    parser.add_argument(
-        "--area_bin_examples",
-        type=int,
-        default=0,
-        help="每个面积区间列出多少张漏检图片名：0=全部列出，N>0=最多 N 条，负数=不列",
     )
     parser.add_argument(
         "--fp_image_examples",
