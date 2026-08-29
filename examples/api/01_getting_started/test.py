@@ -557,7 +557,8 @@ def format_area_split_summary(
 ):
     """把「预测区域 / GT 缺陷」按 split 像素分桶的统计格式化成文本行。
 
-    max_examples 控制小面积桶里列出多少条区域（漏检、误报各自计数）：0 表示全部列出，
+    两个面积桶都会给出漏检（与预测有交集 / 无交集）与误报（与 GT 有交集 / 无交集）的拆分。
+    max_examples 控制每个桶里列出多少条区域（漏检、误报各自计数）：0 表示全部列出，
     正数表示最多 N 条，负数表示不列。
     """
     if not gt_records and not pred_records:
@@ -580,21 +581,22 @@ def format_area_split_summary(
             f"{row['range']:>16} {row['total']:>8} {row['detected']:>8} {row['missed']:>8} {row['miss_rate']:>9.2%}"
         )
 
-    small_gt, small_pred = gt_rows[0], pred_rows[0]
-    lines.append(
-        f"面积 < {split} 的小缺陷漏检: {small_gt['missed']} 个"
-        f"（与预测有交集 {small_gt['missed_overlap']} 个 / 无交集 {small_gt['missed_isolated']} 个）"
-    )
-    lines.append(
-        f"面积 < {split} 的小预测区域误报: {small_pred['fp_overlap'] + small_pred['fp_isolated']} 个"
-        f"（与GT有交集 {small_pred['fp_overlap']} 个 / 无交集 {small_pred['fp_isolated']} 个）"
-    )
-    lines += _format_area_split_examples(f"面积 < {split} 的漏检缺陷", small_gt["missed_items"], max_examples)
-    lines += _format_area_split_examples(
-        f"面积 < {split} 的误报预测区域",
-        [r for r in small_pred["items"] if r["status"] != "matched"],
-        max_examples,
-    )
+    for gt_row, pred_row in zip(gt_rows, pred_rows, strict=False):
+        label = gt_row["range"]
+        lines.append(
+            f"面积 {label} 的缺陷漏检: {gt_row['missed']} 个"
+            f"（与预测有交集 {gt_row['missed_overlap']} 个 / 无交集 {gt_row['missed_isolated']} 个）"
+        )
+        lines.append(
+            f"面积 {label} 的预测区域误报: {pred_row['fp_overlap'] + pred_row['fp_isolated']} 个"
+            f"（与GT有交集 {pred_row['fp_overlap']} 个 / 无交集 {pred_row['fp_isolated']} 个）"
+        )
+        lines += _format_area_split_examples(f"面积 {label} 的漏检缺陷", gt_row["missed_items"], max_examples)
+        lines += _format_area_split_examples(
+            f"面积 {label} 的误报预测区域",
+            [r for r in pred_row["items"] if r["status"] != "matched"],
+            max_examples,
+        )
     return lines
 
 
@@ -1448,7 +1450,7 @@ def get_parser():
         "--area_split_examples",
         type=int,
         default=0,
-        help="小面积桶里列出多少条漏检缺陷/误报区域：0=全部列出，N>0=最多 N 条，负数=不列",
+        help="每个面积桶里列出多少条漏检缺陷/误报区域：0=全部列出，N>0=最多 N 条，负数=不列",
     )
     parser.add_argument(
         "--min_region_area", type=int, default=0, help="忽略面积小于该值的连通域（像素数），用于过滤噪点"
