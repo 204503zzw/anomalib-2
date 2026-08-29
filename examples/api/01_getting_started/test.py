@@ -464,162 +464,6 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.6, min_area=
     }
 
 
-def collect_gt_area_records(image_path, region_metrics):
-    """收集每个 GT 缺陷的面积与检出状态，供面积分箱统计使用。"""
-    image_name = Path(image_path).name
-    return [
-        {
-            "image": image_name,
-            "gt_id": r["gt_id"],
-            "area": r["area"],
-            "status": r["status"],
-            "miss_type": r["miss_type"],
-            "covered_ratio": r["covered_ratio"],
-        }
-        for r in region_metrics["gt_regions"]
-    ]
-
-
-def collect_pred_area_records(image_path, region_metrics):
-    """收集每个预测区域的面积与命中/误报状态，供预测区域面积分桶统计使用。"""
-    image_name = Path(image_path).name
-    return [
-        {
-            "image": image_name,
-            "pred_id": r["pred_id"],
-            "area": r["area"],
-            "status": r["status"],
-            "gt_overlap_ratio": r["gt_overlap_ratio"],
-            "main_gt_area": r["main_gt_area"],
-        }
-        for r in region_metrics["pred_regions"]
-    ]
-
-
-DEFAULT_AREA_SPLIT = 300
-
-
-FALSE_ALARM_BUCKET = "误报(全部)"
-
-
-def summarize_pred_area_split(pred_records, split=DEFAULT_AREA_SPLIT):
-    """按「交集最大的那个 GT 缺陷面积」把命中的预测区域分桶，误报单独一行。
-
-    所有误报区域（不论与 GT 有无交集）都归入 ``误报(全部)`` 行，不进面积桶。
-    """
-    matched_records = [r for r in pred_records if r["status"] == "matched"]
-    buckets = [
-        (f"< {split}", [r for r in matched_records if (r["main_gt_area"] or 0) < split]),
-        (f">= {split}", [r for r in matched_records if (r["main_gt_area"] or 0) >= split]),
-        (FALSE_ALARM_BUCKET, [r for r in pred_records if r["status"] != "matched"]),
-    ]
-    rows = []
-    for label, items in buckets:
-        rows.append({
-            "range": label,
-            "total": len(items),
-            "matched": sum(1 for r in items if r["status"] == "matched"),
-            "fp_overlap": sum(1 for r in items if r["status"] == "false_alarm_overlap"),
-            "fp_isolated": sum(1 for r in items if r["status"] == "false_alarm_isolated"),
-            "items": items,
-        })
-    return rows
-
-
-def summarize_gt_area_split(gt_records, split=DEFAULT_AREA_SPLIT):
-    """按面积把 GT 缺陷分成 < split 和 >= split 两桶，并统计检出/漏检构成。"""
-    buckets = [
-        (f"< {split}", [r for r in gt_records if r["area"] < split]),
-        (f">= {split}", [r for r in gt_records if r["area"] >= split]),
-    ]
-    rows = []
-    for label, items in buckets:
-        missed = [r for r in items if r["status"] == "missed"]
-        rows.append({
-            "range": label,
-            "total": len(items),
-            "detected": len(items) - len(missed),
-            "missed": len(missed),
-            "missed_overlap": sum(1 for r in missed if r["miss_type"] == "overlap"),
-            "missed_isolated": sum(1 for r in missed if r["miss_type"] == "isolated"),
-            "miss_rate": len(missed) / (len(items) + 1e-8),
-            "missed_items": missed,
-        })
-    return rows
-
-
-def _format_area_split_examples(title, items, max_examples):
-    """把区域记录列成 ``图片名(面积)`` 清单，返回 0 或 1 行文本。"""
-    if max_examples < 0 or not items:
-        return []
-    pairs = sorted(((r["image"], r["area"]) for r in items), key=lambda t: (t[0], t[1]))
-    shown = pairs if max_examples == 0 else pairs[:max_examples]
-    text = ", ".join(f"{name}({area})" for name, area in shown)
-    if len(pairs) > len(shown):
-        text += f" ... 共 {len(pairs)} 个"
-    return [f"  {title}（共 {len(pairs)} 个，格式为 图片名(区域面积)）: {text}"]
-
-
-def format_area_split_summary(
-    gt_records,
-    pred_records,
-    split=DEFAULT_AREA_SPLIT,
-    coverage_threshold=0.6,
-    overlap_ratio_threshold=0.01,
-    max_examples=0,
-):
-    """把「预测区域 / GT 缺陷」按 GT 缺陷面积（split 像素为界）分桶的统计格式化成文本行。
-
-    命中的预测区域按它交集最大的那个 GT 缺陷的面积分桶；「命中GT数」列取该面积桶里
-    覆盖率 >= coverage_threshold 的 GT 缺陷数（与 GT 行的检出数一致），「预测区域数」
-    则是预测连通域个数（一个 GT 可能被多个预测区域同时命中）；
-    所有误报区域（不论与 GT 有无交集）单独列在 ``误报(全部)`` 行，并拆成
-    与 GT 有交集 / 无交集两类；GT 侧两个面积桶另给出漏检（与预测有交集 / 无交集）的拆分。
-    max_examples 控制每个桶里列出多少条区域（漏检、误报各自计数）：0 表示全部列出，
-    正数表示最多 N 条，负数表示不列。
-    """
-    if not gt_records and not pred_records:
-        return []
-    lines = [
-        f"【面积分桶统计】分界={split} 像素；检出判定：GT 覆盖率 >= {coverage_threshold:.0%}，"
-        f"有交集判定：交集比例 >= {overlap_ratio_threshold:.0%}",
-        f"{'预测区域(按命中GT面积)':>16} {'命中GT数':>9} {'预测区域数':>10} {'误报(有交集)':>14} {'误报(无交集)':>14}",
-    ]
-    pred_rows = summarize_pred_area_split(pred_records, split)
-    gt_rows = summarize_gt_area_split(gt_records, split)
-    # 命中 GT 数直接取该面积桶里覆盖率达到阈值的 GT 数，与 GT 表的检出数一致
-    hit_gt_by_range = {r["range"]: r["detected"] for r in gt_rows}
-    for row in pred_rows:
-        # 误报行没有对应的命中 GT，置为 "-"
-        hit_gt_text = "-" if row["range"] == FALSE_ALARM_BUCKET else str(hit_gt_by_range.get(row["range"], 0))
-        lines.append(
-            f"{row['range']:>16} {hit_gt_text:>9} {row['total']:>10} "
-            f"{row['fp_overlap']:>14} {row['fp_isolated']:>14}"
-        )
-    lines.append(f"{'GT缺陷面积':>16} {'缺陷数':>8} {'检出':>8} {'漏检':>8} {'漏检率':>10}")
-    for row in gt_rows:
-        lines.append(
-            f"{row['range']:>16} {row['total']:>8} {row['detected']:>8} {row['missed']:>8} {row['miss_rate']:>9.2%}"
-        )
-
-    for gt_row in gt_rows:
-        label = gt_row["range"]
-        lines.append(
-            f"面积 {label} 的缺陷漏检: {gt_row['missed']} 个"
-            f"（与预测有交集 {gt_row['missed_overlap']} 个 / 无交集 {gt_row['missed_isolated']} 个）"
-        )
-        lines += _format_area_split_examples(f"面积 {label} 的漏检缺陷", gt_row["missed_items"], max_examples)
-
-    fa_row = next((r for r in pred_rows if r["range"] == FALSE_ALARM_BUCKET), None)
-    if fa_row is not None:
-        lines.append(
-            f"误报预测区域合计: {fa_row['total']} 个"
-            f"（与GT有交集 {fa_row['fp_overlap']} 个 / 无交集 {fa_row['fp_isolated']} 个）"
-        )
-        lines += _format_area_split_examples("误报预测区域", fa_row["items"], max_examples)
-    return lines
-
-
 def format_fp_image_summary(records, max_examples=0):
     """把有误报的图片按误报类型列成清单。
 
@@ -978,8 +822,6 @@ def infer(args):
 
     results = []
     region_rows = []
-    gt_area_records = []
-    pred_area_records = []
     region_detail_blocks = []
     total_tp = total_fp = total_fn = total_tn = 0
     total_gt_regions = total_detected = total_missed = total_region_fp = 0
@@ -1097,8 +939,6 @@ def infer(args):
                     f"最大IoU={region_metrics['region_best_iou']:.4f}"
                 )
                 region_rows += collect_region_rows(img_path, region_metrics)
-                gt_area_records += collect_gt_area_records(img_path, region_metrics)
-                pred_area_records += collect_pred_area_records(img_path, region_metrics)
                 print_region_details(region_metrics)
                 region_detail_blocks.append({
                     "image": Path(img_path).name,
@@ -1168,18 +1008,6 @@ def infer(args):
         print(f"含误报的图片数:       {images_with_fp}（其中含无交集误报 {images_with_fp_isolated} 张）")
         for line in format_fp_image_summary(fp_image_records, args.fp_image_examples):
             print(line)
-        area_split_lines = format_area_split_summary(
-            gt_area_records,
-            pred_area_records,
-            args.area_split,
-            args.coverage_threshold,
-            args.overlap_ratio_threshold,
-            args.area_split_examples,
-        )
-        if area_split_lines:
-            print("-" * 60)
-            for line in area_split_lines:
-                print(line)
         print("=" * 60)
 
     # ========== 图像级全局汇总 ==========
@@ -1226,15 +1054,6 @@ def infer(args):
                 for line in format_fp_image_summary(fp_image_records, args.fp_image_examples):
                     f.write(line + "\n")
                 f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
-                for line in format_area_split_summary(
-                    gt_area_records,
-                    pred_area_records,
-                    args.area_split,
-                    args.coverage_threshold,
-                    args.overlap_ratio_threshold,
-                    args.area_split_examples,
-                ):
-                    f.write(line + "\n")
 
             f.write("\n" + "=" * 60 + "\n")
             f.write("【图像级评估】\n")
@@ -1340,21 +1159,6 @@ def get_parser():
         type=float,
         default=0.01,
         help="交集判定阈值：交集比例>=该值算与对方区域有交集，否则算无交集（默认0.01）",
-    )
-    parser.add_argument(
-        "--area_split",
-        type=int,
-        default=DEFAULT_AREA_SPLIT,
-        help=(
-            "面积分桶分界（像素数）：按 GT 缺陷面积分成小于/不小于该面积两桶，"
-            f"预测区域按它交集最大的 GT 缺陷面积归桶（默认{DEFAULT_AREA_SPLIT}）"
-        ),
-    )
-    parser.add_argument(
-        "--area_split_examples",
-        type=int,
-        default=0,
-        help="每个面积桶里列出多少条漏检缺陷/误报区域：0=全部列出，N>0=最多 N 条，负数=不列",
     )
     parser.add_argument(
         "--min_region_area", type=int, default=0, help="忽略面积小于该值的连通域（像素数），用于过滤噪点"
