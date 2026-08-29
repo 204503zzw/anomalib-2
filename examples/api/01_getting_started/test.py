@@ -301,6 +301,28 @@ def get_eval_pred_mask(pred, index, anomaly_map, pixel_threshold):
     return (amap_np > pixel_threshold).astype(np.uint8)
 
 
+def get_batch_mask_path(pred, index):
+    """从预测批次里取出 GT 掩膜文件路径，没有则返回 None。"""
+    mask_path = getattr(pred, "mask_path", None)
+    if mask_path is None:
+        return None
+    path = mask_path[index] if isinstance(mask_path, list) else mask_path
+    return str(path) if path else None
+
+
+def get_original_hw(image_path):
+    """读取原图分辨率 (h, w)，读取失败返回 None。"""
+    img = safe_imread(str(image_path))
+    return None if img is None else img.shape[:2]
+
+
+def resize_mask(mask, target_hw):
+    """把掩膜最近邻缩放到 (h, w)，尺寸一致时原样返回。"""
+    if mask.shape == tuple(target_hw):
+        return mask
+    return cv2.resize(mask, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_NEAREST)
+
+
 # ---------- 区域级评估函数 ----------
 def _filter_small_regions(num_labels, labels, min_area):
     """返回面积不小于 min_area 的连通域编号列表。"""
@@ -544,7 +566,7 @@ def format_area_summary(records, edges, max_examples=0):
     if not records:
         return []
     lines = [
-        "【漏检缺陷面积统计】面积单位为像素，基于评估分辨率下的 GT 连通域",
+        "【漏检缺陷面积统计】面积单位为像素，基于原图分辨率下的 GT 连通域",
         f"{'面积区间':>16} {'缺陷数':>8} {'检出':>8} {'漏检':>8} {'漏检率':>10}",
     ]
     rows = summarize_area_bins(records, edges)
@@ -938,14 +960,18 @@ def infer(args):
             img_gt_label = get_batch_gt_label(pred, i)
             batch_gt_mask = get_batch_gt_mask(pred, i)
             eval_pred_mask = get_eval_pred_mask(pred, i, amap, pixel_threshold)
+            # 评估统一在原图分辨率上进行：预测掩膜还原到原图尺寸，GT 优先读原始掩膜文件
+            orig_hw = get_original_hw(img_path)
+            if eval_pred_mask is not None and orig_hw is not None:
+                eval_pred_mask = resize_mask(eval_pred_mask, orig_hw)
             if batch_gt_mask is not None:
                 if eval_pred_mask is not None:
                     pred_mask = eval_pred_mask
-                    gt_mask = batch_gt_mask
-                    if gt_mask.shape != pred_mask.shape:
-                        gt_mask = cv2.resize(
-                            gt_mask, (pred_mask.shape[1], pred_mask.shape[0]), interpolation=cv2.INTER_NEAREST
-                        )
+                    mask_path = get_batch_mask_path(pred, i)
+                    if mask_path and Path(mask_path).is_file():
+                        gt_mask = load_gt_mask(mask_path, target_shape=pred_mask.shape)
+                    else:
+                        gt_mask = resize_mask(batch_gt_mask, pred_mask.shape)
                     pixel_metrics = compute_pixel_metrics(pred_mask, gt_mask)
                     total_tp += pixel_metrics["tp"]
                     total_fp += pixel_metrics["fp"]
