@@ -337,20 +337,24 @@ def _region_bbox(region):
     return x0, y0, x1 - x0 + 1, y1 - y0 + 1
 
 
-def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=0):
+def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.6, min_area=0, overlap_ratio_threshold=0.01):
     """区域级（每个缺陷）评估：按 GT 缺陷被预测覆盖的像素比例判定。
 
     覆盖率 = 该 GT 区域与所有预测区域的交集像素数 / GT 区域面积，
-    >= coverage_threshold 记为检出，否则记为漏检；贡献了该覆盖的预测区域全部算命中，
-      没命中任何已检出 GT 的预测区域记为误报。IoU 仅作为明细里的参考值。
+    >= coverage_threshold（默认 60%）记为检出，否则记为漏检；贡献了该覆盖的预测区域
+      全部算命中，没命中任何已检出 GT 的预测区域记为误报。IoU 仅作为明细里的参考值。
 
-    误报区域再按与 GT 区域的交集情况拆分：与某个 GT 区域有交集（但该 GT 覆盖率
-    不足，所以不算命中）的计入 ``region_fp_overlap``，与所有 GT 区域交集为 0
-    （完全长在正常区域上）的计入 ``region_fp_isolated``。
+    覆盖率不足的 GT 区域按覆盖率再拆分：>= overlap_ratio_threshold（默认 1%，即
+    1%~60%）记为「漏检-与预测有交集」，< overlap_ratio_threshold（0%~1%）记为
+    「漏检-与预测无交集」。
+
+    误报区域按落入 GT 的像素比例拆分：>= overlap_ratio_threshold 的计入
+    ``region_fp_overlap``（与 GT 有交集，但对应 GT 覆盖率不足所以不算命中），
+    < overlap_ratio_threshold（含交集为 0）的计入 ``region_fp_isolated``。
 
     除汇总计数外，还逐个区域给出明细：
     - ``gt_regions``: 每个 GT 缺陷的面积、外接框、覆盖率、最佳 IoU、匹配到的预测区域、
-      检出/漏检状态；
+      检出/漏检状态，以及漏检时的 ``miss_type``（``overlap`` / ``isolated``）；
     - ``pred_regions``: 每个预测区域的面积、外接框、与 GT 的最佳 IoU、状态
       （``matched`` / ``false_alarm_overlap`` / ``false_alarm_isolated``）、与 GT 的交集像素数，
       以及该预测区域落在 GT 内的像素比例。
@@ -362,6 +366,7 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=
     pred_masks = {p: pred_labels == p for p in pred_ids}
 
     detected, missed, matched_pred, ious = 0, 0, set(), []
+    missed_overlap = missed_isolated = 0
     gt_details = []
     pred_best_iou = {p: 0.0 for p in pred_ids}
     pred_inter = {p: 0 for p in pred_ids}
@@ -385,12 +390,19 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=
         ious.append(best_iou)
         covered_ratio = covered / (gt_area + 1e-8)
         hit = covered_ratio >= coverage_threshold
+        miss_type = None
         if hit:
             detected += 1
             # 覆盖可能由多个预测区域共同贡献，它们都算命中
             matched_pred.update(overlapping)
         else:
             missed += 1
+            if covered_ratio >= overlap_ratio_threshold:
+                miss_type = "overlap"
+                missed_overlap += 1
+            else:
+                miss_type = "isolated"
+                missed_isolated += 1
         x, y, w, h = _region_bbox(gt_region)
         gt_details.append({
             "gt_id": g,
@@ -401,6 +413,7 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=
             "matched_inter": best_inter if hit else 0,
             "covered_ratio": covered_ratio,
             "status": "detected" if hit else "missed",
+            "miss_type": miss_type,
         })
 
     pred_details = []
@@ -408,9 +421,10 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=
     for p in pred_ids:
         pred_area = int(pred_masks[p].sum())
         x, y, w, h = _region_bbox(pred_masks[p])
+        overlap_ratio = pred_inter[p] / (pred_area + 1e-8)
         if p in matched_pred:
             status = "matched"
-        elif pred_inter[p] > 0:
+        elif overlap_ratio >= overlap_ratio_threshold:
             status = "false_alarm_overlap"
             fp_overlap += 1
         else:
@@ -422,7 +436,7 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=
             "bbox": (x, y, w, h),
             "best_iou": pred_best_iou[p],
             "gt_inter": pred_inter[p],
-            "gt_overlap_ratio": pred_inter[p] / (pred_area + 1e-8),
+            "gt_overlap_ratio": overlap_ratio,
             "status": status,
         })
 
@@ -431,6 +445,8 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.3, min_area=
         "region_gt": len(gt_ids),
         "region_detected": detected,
         "region_missed": missed,
+        "region_missed_overlap": missed_overlap,
+        "region_missed_isolated": missed_isolated,
         "region_fp": false_alarm_regions,
         "region_fp_overlap": fp_overlap,
         "region_fp_isolated": fp_isolated,
@@ -453,10 +469,133 @@ def collect_gt_area_records(image_path, region_metrics):
             "gt_id": r["gt_id"],
             "area": r["area"],
             "status": r["status"],
+            "miss_type": r["miss_type"],
             "covered_ratio": r["covered_ratio"],
         }
         for r in region_metrics["gt_regions"]
     ]
+
+
+def collect_pred_area_records(image_path, region_metrics):
+    """收集每个预测区域的面积与命中/误报状态，供预测区域面积分桶统计使用。"""
+    image_name = Path(image_path).name
+    return [
+        {
+            "image": image_name,
+            "pred_id": r["pred_id"],
+            "area": r["area"],
+            "status": r["status"],
+            "gt_overlap_ratio": r["gt_overlap_ratio"],
+        }
+        for r in region_metrics["pred_regions"]
+    ]
+
+
+DEFAULT_AREA_SPLIT = 300
+
+
+def summarize_pred_area_split(pred_records, split=DEFAULT_AREA_SPLIT):
+    """按面积把预测区域分成 < split 和 >= split 两桶，并统计命中/误报构成。"""
+    buckets = [
+        (f"< {split}", [r for r in pred_records if r["area"] < split]),
+        (f">= {split}", [r for r in pred_records if r["area"] >= split]),
+    ]
+    rows = []
+    for label, items in buckets:
+        rows.append({
+            "range": label,
+            "total": len(items),
+            "matched": sum(1 for r in items if r["status"] == "matched"),
+            "fp_overlap": sum(1 for r in items if r["status"] == "false_alarm_overlap"),
+            "fp_isolated": sum(1 for r in items if r["status"] == "false_alarm_isolated"),
+            "items": items,
+        })
+    return rows
+
+
+def summarize_gt_area_split(gt_records, split=DEFAULT_AREA_SPLIT):
+    """按面积把 GT 缺陷分成 < split 和 >= split 两桶，并统计检出/漏检构成。"""
+    buckets = [
+        (f"< {split}", [r for r in gt_records if r["area"] < split]),
+        (f">= {split}", [r for r in gt_records if r["area"] >= split]),
+    ]
+    rows = []
+    for label, items in buckets:
+        missed = [r for r in items if r["status"] == "missed"]
+        rows.append({
+            "range": label,
+            "total": len(items),
+            "detected": len(items) - len(missed),
+            "missed": len(missed),
+            "missed_overlap": sum(1 for r in missed if r["miss_type"] == "overlap"),
+            "missed_isolated": sum(1 for r in missed if r["miss_type"] == "isolated"),
+            "miss_rate": len(missed) / (len(items) + 1e-8),
+            "missed_items": missed,
+        })
+    return rows
+
+
+def _format_area_split_examples(title, items, max_examples):
+    """把区域记录列成 ``图片名(面积)`` 清单，返回 0 或 1 行文本。"""
+    if max_examples < 0 or not items:
+        return []
+    pairs = sorted(((r["image"], r["area"]) for r in items), key=lambda t: (t[0], t[1]))
+    shown = pairs if max_examples == 0 else pairs[:max_examples]
+    text = ", ".join(f"{name}({area})" for name, area in shown)
+    if len(pairs) > len(shown):
+        text += f" ... 共 {len(pairs)} 个"
+    return [f"  {title}（共 {len(pairs)} 个，格式为 图片名(区域面积)）: {text}"]
+
+
+def format_area_split_summary(
+    gt_records,
+    pred_records,
+    split=DEFAULT_AREA_SPLIT,
+    coverage_threshold=0.6,
+    overlap_ratio_threshold=0.01,
+    max_examples=0,
+):
+    """把「预测区域 / GT 缺陷」按 split 像素分桶的统计格式化成文本行。
+
+    max_examples 控制小面积桶里列出多少条区域（漏检、误报各自计数）：0 表示全部列出，
+    正数表示最多 N 条，负数表示不列。
+    """
+    if not gt_records and not pred_records:
+        return []
+    lines = [
+        f"【面积分桶统计】分界={split} 像素；检出判定：GT 覆盖率 >= {coverage_threshold:.0%}，"
+        f"有交集判定：交集比例 >= {overlap_ratio_threshold:.0%}",
+        f"{'预测区域面积':>16} {'区域数':>8} {'命中':>8} {'误报(有交集)':>14} {'误报(无交集)':>14}",
+    ]
+    pred_rows = summarize_pred_area_split(pred_records, split)
+    for row in pred_rows:
+        lines.append(
+            f"{row['range']:>16} {row['total']:>8} {row['matched']:>8} "
+            f"{row['fp_overlap']:>14} {row['fp_isolated']:>14}"
+        )
+    lines.append(f"{'GT缺陷面积':>16} {'缺陷数':>8} {'检出':>8} {'漏检':>8} {'漏检率':>10}")
+    gt_rows = summarize_gt_area_split(gt_records, split)
+    for row in gt_rows:
+        lines.append(
+            f"{row['range']:>16} {row['total']:>8} {row['detected']:>8} {row['missed']:>8} {row['miss_rate']:>9.2%}"
+        )
+
+    small_gt, small_pred = gt_rows[0], pred_rows[0]
+    lines.append(
+        f"面积 < {split} 的小缺陷漏检: {small_gt['missed']} 个"
+        f"（与预测有交集 {small_gt['missed_overlap']} 个 / 无交集 {small_gt['missed_isolated']} 个）"
+    )
+    lines.append(
+        f"面积 < {split} 的小预测区域误报: {small_pred['fp_overlap'] + small_pred['fp_isolated']} 个"
+        f"（与GT有交集 {small_pred['fp_overlap']} 个 / 无交集 {small_pred['fp_isolated']} 个）"
+    )
+    lines += _format_area_split_examples(f"面积 < {split} 的漏检缺陷", small_gt["missed_items"], max_examples)
+    lines += _format_area_split_examples(
+        f"面积 < {split} 的误报预测区域",
+        [r for r in small_pred["items"] if r["status"] != "matched"],
+        max_examples,
+    )
+    return lines
 
 
 def parse_area_bins(edges):
@@ -618,6 +757,7 @@ def collect_region_rows(image_path, region_metrics):
             "best_iou": round(r["best_iou"], 4),
             "matched_id": "" if r["matched_pred_id"] is None else r["matched_pred_id"],
             "overlap_ratio": round(r["covered_ratio"], 4),
+            "miss_type": r["miss_type"] or "",
         })
     for r in region_metrics["pred_regions"]:
         x, y, w, h = r["bbox"]
@@ -644,7 +784,10 @@ def format_region_details(region_metrics):
     lines = []
     for r in region_metrics["gt_regions"]:
         x, y, w, h = r["bbox"]
-        state = "检出" if r["status"] == "detected" else "漏检"
+        if r["status"] == "detected":
+            state = "检出"
+        else:
+            state = "漏检(与预测有交集)" if r["miss_type"] == "overlap" else "漏检(与预测无交集)"
         matched = f" 主匹配预测#{r['matched_pred_id']}" if r["matched_pred_id"] is not None else ""
         lines.append(
             f"GT#{r['gt_id']} {state} 面积={r['area']} 框=({x},{y},{w},{h}) "
@@ -926,6 +1069,7 @@ def infer(args):
     results = []
     region_rows = []
     gt_area_records = []
+    pred_area_records = []
     region_detail_blocks = []
     total_tp = total_fp = total_fn = total_tn = 0
     total_gt_regions = total_detected = total_missed = total_region_fp = 0
@@ -1018,6 +1162,7 @@ def infer(args):
                     gt_mask,
                     args.coverage_threshold,
                     args.min_region_area,
+                    args.overlap_ratio_threshold,
                 )
                 pixel_metrics.update(region_metrics)
                 total_gt_regions += region_metrics["region_gt"]
@@ -1043,6 +1188,7 @@ def infer(args):
                 )
                 region_rows += collect_region_rows(img_path, region_metrics)
                 gt_area_records += collect_gt_area_records(img_path, region_metrics)
+                pred_area_records += collect_pred_area_records(img_path, region_metrics)
                 print_region_details(region_metrics)
                 region_detail_blocks.append({
                     "image": Path(img_path).name,
@@ -1112,6 +1258,18 @@ def infer(args):
         print(f"含误报的图片数:       {images_with_fp}（其中含无交集误报 {images_with_fp_isolated} 张）")
         for line in format_fp_image_summary(fp_image_records, args.fp_image_examples):
             print(line)
+        area_split_lines = format_area_split_summary(
+            gt_area_records,
+            pred_area_records,
+            args.area_split,
+            args.coverage_threshold,
+            args.overlap_ratio_threshold,
+            args.area_split_examples,
+        )
+        if area_split_lines:
+            print("-" * 60)
+            for line in area_split_lines:
+                print(line)
         area_summary_lines = format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples)
         if area_summary_lines:
             print("-" * 60)
@@ -1163,6 +1321,15 @@ def infer(args):
                 for line in format_fp_image_summary(fp_image_records, args.fp_image_examples):
                     f.write(line + "\n")
                 f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
+                for line in format_area_split_summary(
+                    gt_area_records,
+                    pred_area_records,
+                    args.area_split,
+                    args.coverage_threshold,
+                    args.overlap_ratio_threshold,
+                    args.area_split_examples,
+                ):
+                    f.write(line + "\n")
                 for line in format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples):
                     f.write(line + "\n")
 
@@ -1262,8 +1429,26 @@ def get_parser():
     parser.add_argument(
         "--coverage_threshold",
         type=float,
-        default=0.8,
-        help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检",
+        default=0.6,
+        help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检（默认0.6）",
+    )
+    parser.add_argument(
+        "--overlap_ratio_threshold",
+        type=float,
+        default=0.01,
+        help="交集判定阈值：交集比例>=该值算与对方区域有交集，否则算无交集（默认0.01）",
+    )
+    parser.add_argument(
+        "--area_split",
+        type=int,
+        default=DEFAULT_AREA_SPLIT,
+        help=f"面积分桶分界（像素数）：统计小于/不小于该面积的预测区域与GT缺陷数（默认{DEFAULT_AREA_SPLIT}）",
+    )
+    parser.add_argument(
+        "--area_split_examples",
+        type=int,
+        default=0,
+        help="小面积桶里列出多少条漏检缺陷/误报区域：0=全部列出，N>0=最多 N 条，负数=不列",
     )
     parser.add_argument(
         "--min_region_area", type=int, default=0, help="忽略面积小于该值的连通域（像素数），用于过滤噪点"
