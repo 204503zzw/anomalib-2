@@ -124,110 +124,42 @@ def safe_imwrite(path: str, img: np.ndarray) -> bool:
     return False
 
 
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
-
-def tensor_to_bgr(image):
-    """把模型输入张量还原成 BGR uint8 图像。
-
-    预处理里做过 ImageNet 归一化，像素值可能是负数；直接 astype(uint8) 会得到
-    发灰/溢出的图，所以先反归一化再转换。
-    """
-    img = image.detach().cpu().numpy()
-    if img.ndim == 3 and img.shape[0] == 3:
-        img = np.transpose(img, (1, 2, 0))
-    img = img.astype(np.float32)
-    normalized = img.ndim == 3 and img.shape[2] == 3 and (img.min() < 0.0 or img.max() > 1.0)
-    if normalized:
-        img = img * IMAGENET_STD + IMAGENET_MEAN
-    if normalized or img.max() <= 1.0 + 1e-6:
-        img = img * 255.0
-    img = np.clip(img, 0, 255).astype(np.uint8)
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    elif img.shape[2] == 3:
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    return img
-
-
-def load_base_image(image_path, fallback_tensor=None):
-    """读取用于叠加的底图：优先用磁盘上的原图（原始分辨率），失败时回退到模型输入张量。"""
-    if image_path is not None:
-        img = safe_imread(str(image_path))
-        if img is not None:
-            return img
-    if fallback_tensor is None:
-        return None
-    return tensor_to_bgr(fallback_tensor)
-
-
-def anomaly_map_to_uint8(anomaly_map, size=None):
-    """归一化 anomaly_map 并按需插值到目标尺寸 (w, h)。
-
-    先在浮点上做双三次插值再量化，避免 uint8 放大产生的块状锯齿。
-    """
-    amap = anomaly_map.squeeze().detach().cpu().numpy().astype(np.float32)
+def save_heatmap(anomaly_map, save_path):
+    amap = anomaly_map.squeeze().cpu().numpy()
     amap = (amap - amap.min()) / (amap.max() - amap.min() + 1e-8)
-    if size is not None and (amap.shape[1], amap.shape[0]) != tuple(size):
-        amap = cv2.resize(amap, tuple(size), interpolation=cv2.INTER_CUBIC)
-        amap = np.clip(amap, 0.0, 1.0)
-    return (amap * 255).astype(np.uint8)
-
-
-def save_heatmap(anomaly_map, save_path, size=None):
-    """保存纯热力图，size 为 (w, h)，给定时按原图分辨率输出。"""
-    heatmap = cv2.applyColorMap(anomaly_map_to_uint8(anomaly_map, size), cv2.COLORMAP_JET)
+    heatmap = (amap * 255).astype(np.uint8)
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
     safe_imwrite(str(save_path), heatmap)
 
 
-def save_overlay(base_image, anomaly_map, save_path, alpha=0.5):
-    """把热力图叠加到底图上，alpha 为热力图权重（0~1）。"""
-    amap = anomaly_map_to_uint8(anomaly_map, (base_image.shape[1], base_image.shape[0]))
+def save_overlay(image, anomaly_map, save_path):
+    img = image.cpu().numpy()
+    if img.shape[0] == 3:
+        img = np.transpose(img, (1, 2, 0))
+    if img.max() <= 1.0:
+        img = (img * 255).astype(np.uint8)
+    else:
+        img = img.astype(np.uint8)
+    if img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    amap = anomaly_map.squeeze().cpu().numpy()
+    amap = (amap - amap.min()) / (amap.max() - amap.min() + 1e-8)
+    amap = (amap * 255).astype(np.uint8)
+    if amap.shape[:2] != img.shape[:2]:
+        amap = cv2.resize(amap, (img.shape[1], img.shape[0]))
     heatmap = cv2.applyColorMap(amap, cv2.COLORMAP_JET)
-    overlay = cv2.addWeighted(base_image, 1.0 - alpha, heatmap, alpha, 0)
+    overlay = cv2.addWeighted(img, 0.7, heatmap, 0.3, 0)
     safe_imwrite(str(save_path), overlay)
 
 
-def save_panel(base_image, anomaly_map, pred_mask, save_path, alpha=0.5):
-    """按原图分辨率拼出「原图 | 热力图叠加 | 预测掩膜轮廓」三联图。
-
-    anomalib 自带的三联图固定按模型输入尺寸（默认 256x256）渲染，放大后很模糊；
-    这里在原图分辨率上重画，缺陷细节可见。
-    """
-    size = (base_image.shape[1], base_image.shape[0])
-    heatmap = cv2.applyColorMap(anomaly_map_to_uint8(anomaly_map, size), cv2.COLORMAP_JET)
-    overlay = cv2.addWeighted(base_image, 1.0 - alpha, heatmap, alpha, 0)
-
-    mask_panel = base_image.copy()
-    if pred_mask is not None:
-        mask = pred_mask.astype(np.uint8)
-        if (mask.shape[1], mask.shape[0]) != size:
-            mask = cv2.resize(mask, size, interpolation=cv2.INTER_NEAREST)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        thickness = max(1, round(min(size) / 400))
-        cv2.drawContours(mask_panel, contours, -1, (0, 0, 255), thickness)
-
-    safe_imwrite(str(save_path), cv2.hconcat([base_image, overlay, mask_panel]))
-
-
-def build_post_processor(
-    pixel_sensitivity=None,
-    image_sensitivity=None,
-    pixel_threshold_method=None,
-    region_num_thresholds=50,
-    region_overlap_ratio=0.5,
-):
+def build_post_processor(pixel_sensitivity=None, image_sensitivity=None):
     """按需构建 OneClassPostProcessor。
 
     sensitivity 作用在归一化后的 [0, 1] 尺度上，阈值 = 1 - sensitivity。
     影响 anomalib 自己产出的 pred_mask / pred_label（即四联图里的红圈）。
-
-    pixel_threshold_method 决定像素阈值由哪条 precision-recall 曲线选出：
-    "pixel_f1" 为逐像素 F1（anomalib 默认），"region_f1" 为区域级（连通域）F1。
-    该阈值只在验证阶段计算，所以设置了它必须再跑一次 engine.validate 才会生效。
     """
-    if pixel_sensitivity is None and image_sensitivity is None and pixel_threshold_method is None:
+    if pixel_sensitivity is None and image_sensitivity is None:
         return None
     # 新版 anomalib 叫 PostProcessor，旧版叫 OneClassPostProcessor，参数相同
     try:
@@ -239,12 +171,7 @@ def build_post_processor(
         kwargs["pixel_sensitivity"] = pixel_sensitivity
     if image_sensitivity is not None:
         kwargs["image_sensitivity"] = image_sensitivity
-    if pixel_threshold_method is not None:
-        kwargs["pixel_threshold_method"] = pixel_threshold_method
-        if pixel_threshold_method == "region_f1":
-            kwargs["region_num_thresholds"] = region_num_thresholds
-            kwargs["region_overlap_ratio"] = region_overlap_ratio
-    print(f">>> 使用 post_processor 参数: {kwargs}")
+    print(f">>> 使用 post_processor sensitivity: {kwargs}")
     return _PP(**kwargs)
 
 
@@ -738,9 +665,10 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5, no_gt_as_n
         no_gt_as_normal: gt_files 中缺少 GT 时是否按正常图计入统计
 
     Returns:
-        dict: 包含TP, FP, TN, FN及各项指标
+        dict: 包含TP, FP, TN, FN、各项指标，以及误检(fp_images)/漏检(fn_images)的图片名
     """
     img_tp = img_fp = img_tn = img_fn = 0
+    fp_images, fn_images = [], []
 
     for idx, pred in enumerate(predictions):
         image_paths = pred.image_path if isinstance(pred.image_path, list) else [pred.image_path]
@@ -764,10 +692,12 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5, no_gt_as_n
                     img_tp += 1
                 elif pred_label == 1 and gt_label == 0:
                     img_fp += 1
+                    fp_images.append((Path(img_path).name, score))
                 elif pred_label == 0 and gt_label == 0:
                     img_tn += 1
                 elif pred_label == 0 and gt_label == 1:
                     img_fn += 1
+                    fn_images.append((Path(img_path).name, score))
 
     # 计算指标
     eps = 1e-8
@@ -792,7 +722,22 @@ def compute_image_metrics(predictions, gt_files, score_threshold=0.5, no_gt_as_n
         "recall": recall,
         "f1": f1,
         "accuracy": accuracy,
+        "fp_images": sorted(fp_images, key=lambda t: (-t[1], t[0])),
+        "fn_images": sorted(fn_images, key=lambda t: (t[1], t[0])),
     }
+
+
+def format_image_error_lists(img_metrics):
+    """把图像级误检/漏检的图片名列成文本行，格式为 图片名(异常分数)。"""
+    lines = []
+    for title, key in (("误检图片(好图判为NG)", "fp_images"), ("漏检图片(缺陷图判为OK)", "fn_images")):
+        items = img_metrics.get(key, [])
+        if not items:
+            lines.append(f"{title}: 无")
+            continue
+        text = ", ".join(f"{name}({score:.4f})" for name, score in items)
+        lines.append(f"{title}（共 {len(items)} 张，格式为 图片名(异常分数)）: {text}")
+    return lines
 
 
 def collect_eval_pairs(predictions, gt_dir=None):
@@ -874,24 +819,15 @@ def infer(args):
     output_dir = Path(args.output)
     heatmap_dir = output_dir / "heatmap"
     overlay_dir = output_dir / "overlay"
-    panel_dir = output_dir / "panel"
     heatmap_dir.mkdir(parents=True, exist_ok=True)
     overlay_dir.mkdir(parents=True, exist_ok=True)
-    if args.save_panel:
-        panel_dir.mkdir(parents=True, exist_ok=True)
 
     engine = Engine(default_root_dir=str(output_dir), devices=1)
     print(">>> 加载模型...")
     model = build_model_from_config(
         args.model,
         args.image_size,
-        build_post_processor(
-            args.pixel_sensitivity,
-            args.image_sensitivity,
-            args.pixel_threshold_method,
-            args.region_num_thresholds,
-            args.region_overlap_ratio,
-        ),
+        build_post_processor(args.pixel_sensitivity, args.image_sensitivity),
     )
 
     print(">>> 加载数据集...")
@@ -909,36 +845,15 @@ def infer(args):
         datamodule.setup("test")
         print(f">>> 测试集共 {len(datamodule.test_data)} 张图片")
         print(f">>> 使用权重: {args.ckpt_path}")
+        engine.test(model=model, datamodule=datamodule, ckpt_path=args.ckpt_path)
         dataloader = datamodule.test_dataloader()
-        val_datamodule = datamodule
     else:
-        datamodule = None
         dataset = PredictDataset(**data_cfg)
         dataloader = DataLoader(dataset, batch_size=1, collate_fn=dataset.collate_fn)
         print(f">>> 开始推理，共 {len(dataset)} 张图片")
         print(f">>> 使用权重: {args.ckpt_path}")
-        val_datamodule = Folder(**dict(args.val_data)) if args.val_data else None
 
-    # 重算 anomalib 内部像素阈值：ckpt 里存的是训练时用 pixel_threshold_method 算出的值，
-    # 换阈值策略必须再跑一次验证循环（验证集需要带 gt_mask）。
-    ckpt_for_inference = args.ckpt_path
-    if args.pixel_threshold_method is not None:
-        if val_datamodule is None:
-            msg = (
-                "设置了 --pixel_threshold_method 却没有可用于重算阈值的验证集："
-                "请使用 --mode test，或用 --val_data 传入 Folder 数据集参数（需包含 mask_dir）。"
-            )
-            raise SystemExit(msg)
-        print(f">>> 用 {args.pixel_threshold_method} 在验证集上重算像素阈值...")
-        engine.validate(model=model, datamodule=val_datamodule, ckpt_path=args.ckpt_path)
-        print(f">>> 重算后的像素阈值: {model.post_processor.pixel_threshold.item():.4f}")
-        # 后续步骤不能再传 ckpt_path，否则新阈值会被 ckpt 里的旧值覆盖
-        ckpt_for_inference = None
-
-    if args.mode == "test":
-        engine.test(model=model, datamodule=datamodule, ckpt_path=ckpt_for_inference)
-
-    predictions = engine.predict(model=model, dataloaders=[dataloader], ckpt_path=ckpt_for_inference)
+    predictions = engine.predict(model=model, dataloaders=[dataloader], ckpt_path=args.ckpt_path)
     if predictions is None or len(predictions) == 0:
         print("!!! 未获得任何预测结果")
         return
@@ -1014,19 +929,8 @@ def infer(args):
             if anomaly_map is not None:
                 amap = anomaly_map[i] if anomaly_map.dim() >= 3 else anomaly_map
                 img = pred.image[i] if pred.image.dim() == 4 else pred.image
-                # 底图用磁盘上的原图，保证热力图画在原始分辨率上而不是 256x256 的模型输入上
-                base_image = load_base_image(img_path if args.overlay_on_original else None, img)
-                base_size = (base_image.shape[1], base_image.shape[0])
-                save_heatmap(amap, heatmap_dir / f"{name}_heatmap.jpg", base_size)
-                save_overlay(base_image, amap, overlay_dir / f"{name}_overlay.jpg", args.overlay_alpha)
-                if args.save_panel:
-                    save_panel(
-                        base_image,
-                        amap,
-                        get_batch_pred_mask(pred, i),
-                        panel_dir / f"{name}_panel.jpg",
-                        args.overlay_alpha,
-                    )
+                save_heatmap(amap, heatmap_dir / f"{name}_heatmap.jpg")
+                save_overlay(img, amap, overlay_dir / f"{name}_overlay.jpg")
 
             # 像素级评估：优先使用 anomalib 的 pred_mask，否则按回退阈值二值化 anomaly_map
             pixel_metrics = None
@@ -1246,6 +1150,8 @@ def infer(args):
             f.write(f"F1-Score: {img_metrics['f1']:.4f}\n")
             f.write(f"阈值: {image_threshold:.4f}\n")
             f.write(f"TP={img_metrics['tp']} FP={img_metrics['fp']} TN={img_metrics['tn']} FN={img_metrics['fn']}\n")
+            for line in format_image_error_lists(img_metrics):
+                f.write(line + "\n")
             f.write("=" * 60 + "\n")
 
             if region_detail_blocks:
@@ -1293,17 +1199,6 @@ def get_parser():
         help="predict：单目录推理；test：用 Folder 数据集跑 engine.test，额外输出 anomalib 官方指标表",
     )
     parser.add_argument("--show", type=bool, default=False, help="是否显示结果图像")
-    # 可视化参数
-    parser.add_argument(
-        "--overlay_on_original",
-        type=bool,
-        default=True,
-        help="热力图叠加到磁盘上的原图（原始分辨率）；关闭则叠加到模型输入图上",
-    )
-    parser.add_argument("--overlay_alpha", type=float, default=0.5, help="热力图叠加权重（0~1），越大热力图越明显")
-    parser.add_argument(
-        "--save_panel", type=bool, default=True, help="另存「原图|热力图叠加|预测掩膜轮廓」三联图（原图分辨率）"
-    )
     parser.add_argument(
         "--image_size", type=list, default=None, help="训练时的输入尺寸 [height, width]，必须与训练脚本一致"
     )
@@ -1316,7 +1211,7 @@ def get_parser():
         help="像素级回退二值化阈值：仅在 pred_mask 不可用时用于 anomaly_map（默认0.5）",
     )
     parser.add_argument(
-        "--scan_threshold", type=bool, default=False, help="是否自动扫描 anomaly_map 回退路径的最佳阈值（像素级）"
+        "--scan_threshold", type=bool, default=True, help="是否自动扫描 anomaly_map 回退路径的最佳阈值（像素级）"
     )
     parser.add_argument(
         "--no_gt_as_normal",
@@ -1326,7 +1221,7 @@ def get_parser():
     )
     # 图像级评估参数
     parser.add_argument("--image_threshold", type=float, default=0.5, help="图像级异常分数阈值（默认0.5）")
-    parser.add_argument("--scan_image_threshold", type=bool, default=False, help="是否自动扫描最佳阈值（图像级）")
+    parser.add_argument("--scan_image_threshold", type=bool, default=True, help="是否自动扫描最佳阈值（图像级）")
     # anomalib 内部后处理阈值（影响可视化四联图里的 pred_mask 红圈），阈值 = 1 - sensitivity
     parser.add_argument(
         "--pixel_sensitivity",
@@ -1337,32 +1232,11 @@ def get_parser():
     parser.add_argument(
         "--image_sensitivity", type=float, default=None, help="anomalib 图像级灵敏度，阈值=1-该值，默认0.5"
     )
-    # anomalib 内部像素阈值的选取策略：设置后会先跑一次验证循环重算阈值，不设则沿用 ckpt 里的阈值
-    parser.add_argument(
-        "--pixel_threshold_method",
-        type=str,
-        default=None,
-        choices=["pixel_f1", "region_f1"],
-        help="像素阈值策略：pixel_f1=逐像素F1（anomalib 默认），region_f1=区域级(连通域)F1；"
-        "设置后需要带 gt_mask 的验证集来重算阈值",
-    )
-    parser.add_argument(
-        "--region_num_thresholds", type=int, default=50, help="region_f1 的候选阈值个数，越大越细但越慢（默认50）"
-    )
-    parser.add_argument(
-        "--region_overlap_ratio",
-        type=float,
-        default=0.5,
-        help="region_f1 的连通域命中所需最小覆盖比例，取值 [0,1)（默认0.5）",
-    )
-    parser.add_argument(
-        "--val_data", type=dict, default=None, help="predict 模式下用于重算阈值的 Folder 数据集参数（需包含 mask_dir）"
-    )
     # 区域级评估参数
     parser.add_argument(
         "--coverage_threshold",
         type=float,
-        default=0.3,
+        default=0.8,
         help="区域级判定阈值：GT缺陷被预测覆盖的像素比例>=该值算检出，否则算漏检",
     )
     parser.add_argument(
