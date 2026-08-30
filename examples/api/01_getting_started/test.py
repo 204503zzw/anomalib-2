@@ -357,7 +357,8 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.6, min_area=
     - ``pred_regions``: 每个预测区域的面积、外接框、与 GT 的最佳 IoU、状态
       （``matched`` / ``false_alarm_overlap`` / ``false_alarm_isolated``）、与 GT 的交集像素数、
       该预测区域落在 GT 内的像素比例，以及交集最大的那个 GT 缺陷的 id 与面积
-      （``main_gt_id`` / ``main_gt_area``，与任何 GT 都不相交时为 ``None``）。
+      （``main_gt_id`` / ``main_gt_area``，与任何 GT 都不相交时为 ``None``）、
+      对该 GT 的覆盖率 ``main_gt_coverage``（交集像素 / 该 GT 面积，无交集时为 0）。
     """
     n_gt, gt_labels = cv2.connectedComponents(gt_mask.astype(np.uint8))
     n_pred, pred_labels = cv2.connectedComponents(pred_mask.astype(np.uint8))
@@ -434,7 +435,7 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.6, min_area=
         else:
             status = "false_alarm_isolated"
             fp_isolated += 1
-        _, main_gt_id, main_gt_area = pred_main_gt[p]
+        main_gt_inter, main_gt_id, main_gt_area = pred_main_gt[p]
         pred_details.append({
             "pred_id": p,
             "area": pred_area,
@@ -445,6 +446,7 @@ def compute_region_metrics(pred_mask, gt_mask, coverage_threshold=0.6, min_area=
             "status": status,
             "main_gt_id": main_gt_id,
             "main_gt_area": main_gt_area if main_gt_id is not None else None,
+            "main_gt_coverage": main_gt_inter / (main_gt_area + 1e-8) if main_gt_id is not None else 0.0,
         })
 
     false_alarm_regions = len(pred_ids) - len(matched_pred)
@@ -499,16 +501,36 @@ def summarize_gt_area_table(gt_records, split=DEFAULT_AREA_SPLIT, coverage_thres
     }
 
 
-def summarize_gt_overlap_table(gt_records, coverage_threshold=0.6, overlap_ratio_threshold=0.01):
-    """GT 缺陷按与预测的交集（覆盖率）分成 >=60% / 1%-60% / 0%-1% 三档，三档之和等于总数。"""
-    high = sum(1 for r in gt_records if r["covered_ratio"] >= coverage_threshold)
-    mid = sum(1 for r in gt_records if overlap_ratio_threshold <= r["covered_ratio"] < coverage_threshold)
-    low = sum(1 for r in gt_records if r["covered_ratio"] < overlap_ratio_threshold)
-    return {"total": len(gt_records), "high": high, "mid": mid, "low": low}
+def collect_pred_records(image_path, region_metrics):
+    """收集每个预测区域对它交集最大那个 GT 缺陷的覆盖率，供区域级汇总表统计使用。"""
+    image_name = Path(image_path).name
+    return [
+        {
+            "image": image_name,
+            "pred_id": r["pred_id"],
+            "area": r["area"],
+            "main_gt_coverage": r["main_gt_coverage"],
+            "status": r["status"],
+        }
+        for r in region_metrics["pred_regions"]
+    ]
+
+
+def summarize_pred_overlap_table(pred_records, coverage_threshold=0.6, overlap_ratio_threshold=0.01):
+    """预测区域按它对 GT 的覆盖率分成 >=60% / 1%-60% / 0%-1% 三档。
+
+    覆盖率 = 该预测区域与 GT 的交集像素 / 该 GT 面积（取交集最大的那个 GT，
+    与任何 GT 都不相交时记 0），因此三档之和等于预测区域总数。
+    """
+    high = sum(1 for r in pred_records if r["main_gt_coverage"] >= coverage_threshold)
+    mid = sum(1 for r in pred_records if overlap_ratio_threshold <= r["main_gt_coverage"] < coverage_threshold)
+    low = sum(1 for r in pred_records if r["main_gt_coverage"] < overlap_ratio_threshold)
+    return {"total": len(pred_records), "high": high, "mid": mid, "low": low}
 
 
 def format_region_summary_tables(
     gt_records,
+    pred_records,
     total_fp,
     split=DEFAULT_AREA_SPLIT,
     coverage_threshold=0.6,
@@ -518,13 +540,13 @@ def format_region_summary_tables(
 
     表1 按 GT 缺陷面积分桶：``total | < split | fn | >= split | fn | total_fp``，
     fn 为该面积桶里覆盖率不足 coverage_threshold 的缺陷数，total_fp 为全部误报区域数。
-    表2 按 GT 覆盖率分档：``total | >= coverage_threshold | overlap~coverage | < overlap``，
-    三档之和等于 total。
+    表2 按预测区域对 GT 的覆盖率分档：``total | >= coverage | overlap~coverage | < overlap``，
+    total 为预测区域总数，三档之和等于 total。
     """
-    if not gt_records:
+    if not gt_records and not pred_records:
         return []
     area_row = summarize_gt_area_table(gt_records, split, coverage_threshold)
-    overlap_row = summarize_gt_overlap_table(gt_records, coverage_threshold, overlap_ratio_threshold)
+    overlap_row = summarize_pred_overlap_table(pred_records, coverage_threshold, overlap_ratio_threshold)
     side = int(round(split**0.5))
     high_label = f"与GT交集(>={coverage_threshold:.0%})"
     mid_label = f"与GT交集({overlap_ratio_threshold:.0%}-{coverage_threshold:.0%})"
@@ -534,7 +556,7 @@ def format_region_summary_tables(
         f"{'total':>8} {f'< {split}':>10} {'fn':>8} {f'> {split}':>10} {'fn':>8} {'total_fp':>10}",
         f"{area_row['total']:>8} {area_row['small']:>10} {area_row['small_fn']:>8} "
         f"{area_row['large']:>10} {area_row['large_fn']:>8} {total_fp:>10}",
-        "【GT缺陷与预测的交集分档】覆盖率 = 被预测覆盖的 GT 像素 / GT 面积",
+        "【预测区域与 GT 的交集分档】total=预测区域总数；覆盖率 = 该区域覆盖的 GT 像素 / 该 GT 面积",
         f"{'total':>8} {high_label:>18} {mid_label:>18} {low_label:>18}",
         f"{overlap_row['total']:>8} {overlap_row['high']:>18} {overlap_row['mid']:>18} {overlap_row['low']:>18}",
     ]
@@ -899,6 +921,7 @@ def infer(args):
     results = []
     region_rows = []
     gt_records = []
+    pred_records = []
     region_detail_blocks = []
     total_tp = total_fp = total_fn = total_tn = 0
     total_gt_regions = total_detected = total_missed = total_region_fp = 0
@@ -1017,6 +1040,7 @@ def infer(args):
                 )
                 region_rows += collect_region_rows(img_path, region_metrics)
                 gt_records += collect_gt_records(img_path, region_metrics)
+                pred_records += collect_pred_records(img_path, region_metrics)
                 print_region_details(region_metrics)
                 region_detail_blocks.append({
                     "image": Path(img_path).name,
@@ -1088,6 +1112,7 @@ def infer(args):
             print(line)
         summary_table_lines = format_region_summary_tables(
             gt_records,
+            pred_records,
             total_region_fp,
             args.area_split,
             args.coverage_threshold,
@@ -1145,6 +1170,7 @@ def infer(args):
                 f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
                 for line in format_region_summary_tables(
                     gt_records,
+                    pred_records,
                     total_region_fp,
                     args.area_split,
                     args.coverage_threshold,
