@@ -516,11 +516,13 @@ def format_region_summary_tables(
     split=DEFAULT_AREA_SPLIT,
     coverage_threshold=0.6,
     overlap_ratio_threshold=0.01,
+    split_side=None,
 ):
     """把区域级结果格式化成两张汇总表。
 
     表1 按 GT 缺陷面积分桶：``total | < split | fn | >= split | fn | total_fp``，
     fn 为该面积桶里覆盖率不足 coverage_threshold 的缺陷数，total_fp 为全部误报区域数。
+    传入 split_side 时表头按 ``N x N`` 展示边长（分界面积为 N*N）。
     表2 按预测区域对 GT 的覆盖率分档：``total | >= coverage | overlap~coverage | < overlap``，
     total 为预测区域总数，三档之和等于 total。
     """
@@ -528,12 +530,16 @@ def format_region_summary_tables(
         return []
     area_row = summarize_gt_area_table(gt_records, split, coverage_threshold)
     overlap_row = summarize_pred_overlap_table(pred_records, coverage_threshold, overlap_ratio_threshold)
-    side = int(round(split**0.5))
+    if split_side:
+        split_label = f"{split_side}x{split_side}={split} 像素"
+    else:
+        side = int(round(split**0.5))
+        split_label = f"{split} 像素（约 {side}x{side}）"
     high_label = f"与GT交集(>={coverage_threshold:.0%})"
     mid_label = f"与GT交集({overlap_ratio_threshold:.0%}-{coverage_threshold:.0%})"
     low_label = f"与GT交集(0%-{overlap_ratio_threshold:.0%})"
     return [
-        f"【GT缺陷面积分桶】分界={split} 像素（约 {side}x{side}）；fn=覆盖率 < {coverage_threshold:.0%} 的缺陷数",
+        f"【GT缺陷面积分桶】分界={split_label}；fn=覆盖率 < {coverage_threshold:.0%} 的缺陷数",
         f"{'total':>8} {f'< {split}':>10} {'fn':>8} {f'> {split}':>10} {'fn':>8} {'total_fp':>10}",
         f"{area_row['total']:>8} {area_row['small']:>10} {area_row['small_fn']:>8} "
         f"{area_row['large']:>10} {area_row['large_fn']:>8} {total_fp:>10}",
@@ -1035,6 +1041,9 @@ def infer(args):
         image_threshold = args.image_threshold
     print(f">>> 使用图像级阈值: {image_threshold:.4f}")
 
+    # 面积分桶分界：给了边长就用 N*N，否则直接用面积值
+    area_split = args.area_split_side**2 if args.area_split_side else args.area_split
+
     results = []
     region_rows = []
     gt_area_records = []
@@ -1234,9 +1243,10 @@ def infer(args):
             gt_records,
             pred_records,
             total_region_fp,
-            args.area_split,
+            area_split,
             args.coverage_threshold,
             args.overlap_ratio_threshold,
+            args.area_split_side,
         )
         if summary_table_lines:
             print("-" * 60)
@@ -1294,9 +1304,10 @@ def infer(args):
                     gt_records,
                     pred_records,
                     total_region_fp,
-                    args.area_split,
+                    area_split,
                     args.coverage_threshold,
                     args.overlap_ratio_threshold,
+                    args.area_split_side,
                 ):
                     f.write(line + "\n")
 
@@ -1410,6 +1421,12 @@ def get_parser():
         type=int,
         default=DEFAULT_AREA_SPLIT,
         help=f"GT缺陷面积分桶分界（像素数），默认 {DEFAULT_AREA_SPLIT}",
+    )
+    parser.add_argument(
+        "--area_split_side",
+        type=int,
+        default=None,
+        help="按边长指定面积分桶分界：传 N 则分界=N*N 像素（优先于 --area_split）",
     )
     parser.add_argument(
         "--min_region_area", type=int, default=0, help="忽略面积小于该值的连通域（像素数），用于过滤噪点"
