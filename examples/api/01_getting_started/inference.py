@@ -588,6 +588,17 @@ def parse_area_bins(edges):
     return sorted(values)
 
 
+def resolve_area_bin_edges(edges, sides=None):
+    """解析面积分箱边界：给了边长列表就按 N*N 换算，否则直接用面积值。
+
+    两个参数都接受 ``[4, 8]`` / ``"4,8"`` / ``"[4, 8]"`` 等写法。
+    """
+    sides = parse_area_bins(sides)
+    if sides:
+        return sorted({s**2 for s in sides})
+    return parse_area_bins(edges)
+
+
 def summarize_area_bins(records, edges):
     """按缺陷面积分箱统计检出/漏检数量。
 
@@ -749,7 +760,6 @@ def collect_region_rows(image_path, region_metrics):
             "main_gt_coverage": round(r["main_gt_coverage"], 4),
         })
     return rows
-
 
 
 def format_region_details(region_metrics):
@@ -1043,6 +1053,7 @@ def infer(args):
 
     # 面积分桶分界：给了边长就用 N*N，否则直接用面积值
     area_split = args.area_split_side**2 if args.area_split_side else args.area_split
+    area_bin_edges = resolve_area_bin_edges(args.area_bins, args.area_bin_sides)
 
     results = []
     region_rows = []
@@ -1234,7 +1245,7 @@ def infer(args):
         print(f"含误报的图片数:       {images_with_fp}（其中含无交集误报 {images_with_fp_isolated} 张）")
         for line in format_fp_image_summary(fp_image_records, args.fp_image_examples):
             print(line)
-        area_summary_lines = format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples)
+        area_summary_lines = format_area_summary(gt_area_records, area_bin_edges, args.area_bin_examples)
         if area_summary_lines:
             print("-" * 60)
             for line in area_summary_lines:
@@ -1298,7 +1309,7 @@ def infer(args):
                 for line in format_fp_image_summary(fp_image_records, args.fp_image_examples):
                     f.write(line + "\n")
                 f.write(f"区域级漏检率: {total_missed / (total_gt_regions + 1e-8):.4f}\n")
-                for line in format_area_summary(gt_area_records, args.area_bins, args.area_bin_examples):
+                for line in format_area_summary(gt_area_records, area_bin_edges, args.area_bin_examples):
                     f.write(line + "\n")
                 for line in format_region_summary_tables(
                     gt_records,
@@ -1436,6 +1447,12 @@ def get_parser():
         type=Union[str, list[int]],
         default=DEFAULT_AREA_BINS,
         help="缺陷面积分箱边界（像素数），用于统计各面积区间的漏检率，如 [4,8,16,32] 或 4,8,16,32",
+    )
+    parser.add_argument(
+        "--area_bin_sides",
+        type=Union[str, list[int]],
+        default=None,
+        help="按边长指定面积分箱边界：传 2,4,8 则边界=4,16,64 像素（优先于 --area_bins）",
     )
     parser.add_argument(
         "--area_bin_examples",
